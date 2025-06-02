@@ -104,6 +104,8 @@
 		<module>mcp-spring/mcp-spring-webflux</module>
 		<module>mcp-spring/mcp-spring-webmvc</module>
 		<module>mcp-test</module>
+        <module>aws-search-example</module>
+		<module>aws-search-example-client</module>
 	</modules>
 
 	<build>
