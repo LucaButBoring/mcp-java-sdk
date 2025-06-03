@@ -38,245 +38,260 @@ import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.function.BiFunction;
+import java.util.function.Function;
 
 public class Main {
-    private static final Logger logger = LoggerFactory.getLogger(Main.class);
 
-    public static void main(String[] args) throws IOException, URISyntaxException {
-        var region = Region.US_WEST_2;
-        var endpoint = System.getenv("OS_ENDPOINT");
-        var username = System.getenv("OS_USERNAME");
-        var password = System.getenv("OS_PASSWORD");
+	private static final Logger logger = LoggerFactory.getLogger(Main.class);
 
-        logger.info("Creating service clients");
-        var openSearchClient = createClient(endpoint, username, password);
-        var bedrockClient = BedrockRuntimeClient.builder()
-                .region(region)
-                .build();
+	private static final ObjectMapper objectMapper = new ObjectMapper();
 
-        logger.info("Starting MCP server");
-        var transportProvider = HttpServletSseServerTransportProvider.builder()
-                .baseUrl("http://localhost:9200")
-                .messageEndpoint("/mcp/message")
-                .build();
-        startTomcat(transportProvider);
+	public static void main(String[] args) throws IOException, URISyntaxException {
+		var region = Region.US_WEST_2;
+		var endpoint = System.getenv("OS_ENDPOINT");
+		var username = System.getenv("OS_USERNAME");
+		var password = System.getenv("OS_PASSWORD");
 
-        var tools = createTools();
-        var indexName = indexTools(openSearchClient, bedrockClient, tools);
+		logger.info("Creating service clients");
+		var openSearchClient = createClient(endpoint, username, password);
+		var bedrockClient = BedrockRuntimeClient.builder().region(region).build();
 
-        McpServer.sync(transportProvider)
-                .serverInfo("aws-search-example", "1.0.0")
-                .capabilities(McpSchema.ServerCapabilities.builder()
-                        // Enable the search capability
-                        .tools(McpSchema.ServerCapabilities.ToolCapabilities.builder()
-                                .search(true)
-                                .build())
-                        .build())
-                .tools(tools)
-                // Create the search handler function
-                .toolSearchHandler((e, request) -> {
-                    try {
-                        return McpSchema.SearchToolsResult.builder()
-                                .tools(searchTools(openSearchClient, bedrockClient, indexName, request.query()))
-                                .build();
-                    } catch (IOException | URISyntaxException ex) {
-                        throw new RuntimeException(ex);
-                    }
-                })
-                .build();
-        logger.info("MCP server now ready");
-    }
+		logger.info("Starting MCP server");
+		var transportProvider = HttpServletSseServerTransportProvider.builder()
+			.baseUrl("http://localhost:9200")
+			.messageEndpoint("/mcp/message")
+			.build();
+		startTomcat(transportProvider);
 
-    private static List<McpSchema.Tool> searchTools(OpenSearchClient openSearchClient, BedrockRuntimeClient bedrockClient, String indexName, String query) throws IOException, URISyntaxException {
-        // Generate an embedding
-        logger.info("Embedding query: {}", query);
-        var embeddingResponse = embedText(bedrockClient, query, "search_query");
-        float[] embedding = new float[embeddingResponse.size()];
-        for(int i = 0; i < embeddingResponse.size(); i++) embedding[i] = embeddingResponse.get(i);
-        logger.info("Query embedding result: {}", embedding);
+		var tools = createTools();
+		var indexName = indexTools(openSearchClient, bedrockClient, tools);
 
-        // kNN search
-        logger.info("Searching index [{}] for query: {}", indexName, query);
-        var searchResponse = openSearchClient.search(request -> request
-                .index(indexName)
-                .size(2)
-                .query(q -> q.knn(knn -> knn
-                        .field("embedding")
-                        .k(2)
-                        .vector(embedding))), ToolDocument.class);
-        validateSearchResponse(searchResponse);
-        logger.info("Found {} documents", searchResponse.hits().hits().size());
+		McpServer.sync(transportProvider)
+			.serverInfo("aws-search-example", "1.0.0")
+			.capabilities(McpSchema.ServerCapabilities.builder()
+				// Enable the search capability
+				.tools(McpSchema.ServerCapabilities.ToolCapabilities.builder().search(true).build())
+				.build())
+			.tools(tools)
+			// Create the search handler function
+			.toolSearchHandler((e, request) -> {
+				try {
+					return McpSchema.SearchToolsResult.builder()
+						.tools(searchTools(openSearchClient, bedrockClient, indexName, request.query()))
+						.build();
+				}
+				catch (IOException | URISyntaxException ex) {
+					throw new RuntimeException(ex);
+				}
+			})
+			.build();
+		logger.info("MCP server now ready");
+	}
 
-        return searchResponse.hits().hits().stream()
-                .map(Hit::source)
-                .filter(Objects::nonNull)
-                .map(toolDocument -> new McpSchema.Tool(toolDocument.name(), toolDocument.description(), toolDocument.inputSchema()))
-                .toList();
-    }
+	private static List<McpSchema.Tool> searchTools(OpenSearchClient openSearchClient,
+			BedrockRuntimeClient bedrockClient, String indexName, String query) throws IOException, URISyntaxException {
+		// Generate an embedding
+		logger.info("Embedding query: {}", query);
+		var embeddingResponse = embedText(bedrockClient, query, "search_query");
+		float[] embedding = new float[embeddingResponse.size()];
+		for (int i = 0; i < embeddingResponse.size(); i++)
+			embedding[i] = embeddingResponse.get(i);
 
-    private static void validateSearchResponse(final SearchResponse<?> response) {
-        if (response == null) {
-            throw new RuntimeException("Search response was null");
-        }
+		// kNN search
+		logger.info("Searching index [{}] for query: {}", indexName, query);
+		var searchResponse = openSearchClient.search(request -> request.index(indexName)
+			.size(3)
+			.query(q -> q.knn(knn -> knn.field("embedding").k(3).vector(embedding))), ToolDocument.class);
+		validateSearchResponse(searchResponse);
+		logger.info("Found {} documents", searchResponse.hits().hits().size());
 
-        if (response.timedOut()) {
-            throw new RuntimeException("Search timed out");
-        }
+		return searchResponse.hits()
+			.hits()
+			.stream()
+			.map(Hit::source)
+			.filter(Objects::nonNull)
+			.map(toolDocument -> new McpSchema.Tool(toolDocument.name(), toolDocument.description(),
+					toolDocument.inputSchema()))
+			.toList();
+	}
 
-        if (Boolean.TRUE.equals(response.terminatedEarly())) {
-            throw new RuntimeException("Search terminated early");
-        }
-    }
+	private static void validateSearchResponse(final SearchResponse<?> response) {
+		if (response == null) {
+			throw new RuntimeException("Search response was null");
+		}
 
-    private static String indexTools(OpenSearchClient openSearchClient, BedrockRuntimeClient bedrockClient, List<McpServerFeatures.SyncToolSpecification> tools) throws IOException {
-        var indexName = "index-0";
-        var objectMapper = new ObjectMapper();
+		if (response.timedOut()) {
+			throw new RuntimeException("Search timed out");
+		}
 
-        logger.info("Deleting index [{}]", indexName);
-        try {
-            openSearchClient.indices().delete(request -> request.index(indexName));
-            logger.info("Deleted index [{}]", indexName);
-        } catch (final OpenSearchException e) {
-            if (!e.getMessage().contains("[index_not_found_exception]")) {
-                throw e;
-            }
-        }
+		if (Boolean.TRUE.equals(response.terminatedEarly())) {
+			throw new RuntimeException("Search terminated early");
+		}
+	}
 
-        logger.info("Creating index [{}]", indexName);
-        try {
-            openSearchClient.indices().create(request -> request
-                    .index(indexName)
-                    .settings(settings -> settings.knn(true))
-                    .mappings(mappings -> mappings
-                            .properties(Map.of("embedding", Property.of(prop -> prop
-                                    .knnVector(knnVector -> knnVector
-                                            .dimension(256)
-                                            .method(method -> method
-                                                    .name("hnsw")
-                                                    .engine("faiss")
-                                                    .spaceType("cosinesimil")
-                                                    .parameters(Map.of(
-                                                            "ef_construction", JsonData.of(128),
-                                                            "m", JsonData.of(24)
-                                                    )))))))));
-            logger.info("Created index [{}]", indexName);
-        } catch (final OpenSearchException e) {
-            if (!e.getMessage().contains("[resource_already_exists_exception]")) {
-                throw e;
-            }
-        }
+	private static String indexTools(OpenSearchClient openSearchClient, BedrockRuntimeClient bedrockClient,
+			List<McpServerFeatures.SyncToolSpecification> tools) throws IOException {
+		var indexName = "index-0";
 
-        logger.info("Indexing tools");
-        for (var toolSpec : tools) {
-            var tool = toolSpec.tool();
+		logger.info("Deleting index [{}]", indexName);
+		try {
+			openSearchClient.indices().delete(request -> request.index(indexName));
+			logger.info("Deleted index [{}]", indexName);
+		}
+		catch (final OpenSearchException e) {
+			if (!e.getMessage().contains("[index_not_found_exception]")) {
+				throw e;
+			}
+		}
 
-            // Generate an embedding
-            var embeddingInputText = tool.name() + ": " + tool.description();
-            logger.info("Embedding tool: [{}]", embeddingInputText);
-            var embeddingResponse = embedText(bedrockClient, embeddingInputText, "search_document");
-            logger.info("Embedding result: {}", embeddingResponse);
+		logger.info("Creating index [{}]", indexName);
+		try {
+			openSearchClient.indices()
+				.create(request -> request.index(indexName)
+					.settings(settings -> settings.knn(true))
+					.mappings(mappings -> mappings.properties(Map
+						.of("embedding", Property.of(prop -> prop.knnVector(knnVector -> knnVector.dimension(256)
+							.method(method -> method.name("hnsw")
+								.engine("faiss")
+								.spaceType("cosinesimil")
+								.parameters(Map.of("ef_construction", JsonData.of(128), "m", JsonData.of(24))))))))));
+			logger.info("Created index [{}]", indexName);
+		}
+		catch (final OpenSearchException e) {
+			if (!e.getMessage().contains("[resource_already_exists_exception]")) {
+				throw e;
+			}
+		}
 
-            // Upsert the tool document
-            logger.info("Indexing tool into index [{}]: {}", indexName, tool.name());
-            var inputSchema = objectMapper.writeValueAsString(tool.inputSchema());
-            openSearchClient.index(request -> request
-                    .index(indexName)
-                    .document(new ToolDocument(embeddingResponse, tool.name(), tool.description(), inputSchema))
-                    .refresh(Refresh.True));
-        }
-        logger.info("Indexed tools");
+		logger.info("Indexing tools");
+		for (var toolSpec : tools) {
+			var tool = toolSpec.tool();
 
-        return indexName;
-    }
+			// Generate an embedding
+			var embeddingInputText = tool.name() + ": " + tool.description();
+			logger.info("Embedding tool: [{}]", embeddingInputText);
+			var embeddingResponse = embedText(bedrockClient, embeddingInputText, "search_document");
 
-    private static List<Float> embedText(BedrockRuntimeClient bedrockClient, String text, String type) throws JsonProcessingException {
-        var embeddingRequest = "{ \"inputText\": \"{{inputText}}\", \"dimensions\": 256 }";
-        var embeddingResponse = bedrockClient.invokeModel(request -> request
-                .modelId("amazon.titan-embed-text-v2:0")
-                .body(SdkBytes.fromUtf8String(embeddingRequest.replace("{{inputText}}", text)))
-                .accept("*/*")
-                .contentType("application/json")
-                .build());
-        var objectMapper = new ObjectMapper();
-        return objectMapper.readValue(embeddingResponse.body().asUtf8String(), EmbeddingResult.class).embedding();
-    }
+			// Upsert the tool document
+			logger.info("Indexing tool into index [{}]: {}", indexName, tool.name());
+			var inputSchema = objectMapper.writeValueAsString(tool.inputSchema());
+			openSearchClient.index(request -> request.index(indexName)
+				.document(new ToolDocument(embeddingResponse, tool.name(), tool.description(), inputSchema))
+				.refresh(Refresh.True));
+		}
+		logger.info("Indexed tools");
 
-    private record ToolDocument(
-            @JsonProperty("embedding") List<Float> embedding,
-            @JsonProperty("name") String name,
-            @JsonProperty("description") String description,
-            @JsonProperty("inputSchema") String inputSchema) {
-    }
+		return indexName;
+	}
 
-    @JsonIgnoreProperties(ignoreUnknown = true)
-    private record EmbeddingResult(@JsonProperty("embedding") List<Float> embedding) {
-    }
+	private static List<Float> embedText(BedrockRuntimeClient bedrockClient, String text, String type)
+			throws JsonProcessingException {
+		var embeddingRequest = "{ \"inputText\": \"{{inputText}}\", \"dimensions\": 256 }";
+		var embeddingResponse = bedrockClient.invokeModel(request -> request.modelId("amazon.titan-embed-text-v2:0")
+			.body(SdkBytes.fromUtf8String(embeddingRequest.replace("{{inputText}}", text)))
+			.accept("*/*")
+			.contentType("application/json")
+			.build());
+		return objectMapper.readValue(embeddingResponse.body().asUtf8String(), EmbeddingResult.class).embedding();
+	}
 
-    private static List<McpServerFeatures.SyncToolSpecification> createTools() {
-        return List.of(
-                createToolSpec("search_websites", "Searches the internet for information."),
-                createToolSpec("search_files", "Searches the filesystem for matching files."),
-                createToolSpec("read_file", "Reads a file from the filesystem."),
-                createToolSpec("read_files", "Reads multiple files from the filesystem."),
-                createToolSpec("write_file", "Writes a file to the filesystem."),
-                createToolSpec("write_files", "Writes multiple files to the filesystem.")
-        );
-    }
+	private record ToolDocument(@JsonProperty("embedding") List<Float> embedding, @JsonProperty("name") String name,
+			@JsonProperty("description") String description, @JsonProperty("inputSchema") String inputSchema) {
+	}
 
-    private static McpServerFeatures.SyncToolSpecification createToolSpec(String name, String description) {
-        return new McpServerFeatures.SyncToolSpecification(new McpSchema.Tool(name, description, EMPTY_JSON_SCHEMA), DUMMY_HANDLER);
-    }
+	@JsonIgnoreProperties(ignoreUnknown = true)
+	private record EmbeddingResult(@JsonProperty("embedding") List<Float> embedding) {
+	}
 
-    private static final String EMPTY_JSON_SCHEMA = """
+	private static List<McpServerFeatures.SyncToolSpecification> createTools() {
+		// Create some dummy tools that do trivial work
+		return List.of(
+				createSingleArgToolSpec("search_websites", "Searches the internet for information.",
+						(value) -> "This is a useful response."),
+				createSingleArgToolSpec("search_files", "Searches the filesystem for matching files.",
+						(value) -> "Found files: [/var/log/mcp.log]"),
+				createSingleArgToolSpec("read_file", "Reads a file from the filesystem.", (value) -> "Hello, world!"),
+				createSingleArgToolSpec("read_files", "Reads multiple files from the filesystem.",
+						(value) -> "All files contained the same content: [Hello, world!]"),
+				createSingleArgToolSpec("write_file", "Writes a file to the filesystem.", (value) -> "success"),
+				createSingleArgToolSpec("write_files", "Writes multiple files to the filesystem.",
+						(value) -> "success"));
+	}
+
+	private static McpServerFeatures.SyncToolSpecification createSingleArgToolSpec(String name, String description,
+			Function<String, String> executeTool) {
+		return new McpServerFeatures.SyncToolSpecification(
+				new McpSchema.Tool(name, description, SINGLE_ARG_JSON_SCHEMA), (ex, params) -> {
+					try {
+						var arg = params.get("value");
+						var result = executeTool.apply((String) arg);
+						return McpSchema.CallToolResult.builder().addTextContent(result).build();
+					}
+					catch (final Exception e) {
+						logger.error(e.getMessage(), e);
+						throw e;
+					}
+				});
+	}
+
+	private static final String SINGLE_ARG_JSON_SCHEMA = """
 			{
 				"$schema": "http://json-schema.org/draft-07/schema#",
 				"type": "object",
-				"properties": {}
+				"properties": {
+				    "value": {
+				        "type": "string"
+				    }
+				}
 			}
 			""";
 
-    private static final BiFunction<McpSyncServerExchange, Map<String, Object>, McpSchema.CallToolResult> DUMMY_HANDLER = (e, r) -> McpSchema.CallToolResult.builder().addTextContent("success").build();
+	private static final BiFunction<McpSyncServerExchange, Map<String, Object>, McpSchema.CallToolResult> DUMMY_HANDLER = (
+			e, r) -> McpSchema.CallToolResult.builder().addTextContent("success").build();
 
-    private static OpenSearchClient createClient(String endpoint, String username, String password) throws URISyntaxException {
-        final HttpHost host = HttpHost.create(endpoint);
+	private static OpenSearchClient createClient(String endpoint, String username, String password)
+			throws URISyntaxException {
+		final HttpHost host = HttpHost.create(endpoint);
 
-        final BasicCredentialsProvider credentialsProvider = new BasicCredentialsProvider();
-        credentialsProvider.setCredentials(new AuthScope(host), new UsernamePasswordCredentials(username, password.toCharArray()));
+		final BasicCredentialsProvider credentialsProvider = new BasicCredentialsProvider();
+		credentialsProvider.setCredentials(new AuthScope(host),
+				new UsernamePasswordCredentials(username, password.toCharArray()));
 
-        final OpenSearchTransport transport = ApacheHttpClient5TransportBuilder.builder(host)
-                .setHttpClientConfigCallback(httpClientBuilder -> httpClientBuilder
-                        .setDefaultCredentialsProvider(credentialsProvider))
-                .build();
-        return new OpenSearchClient(transport);
-    }
+		final OpenSearchTransport transport = ApacheHttpClient5TransportBuilder.builder(host)
+			.setHttpClientConfigCallback(
+					httpClientBuilder -> httpClientBuilder.setDefaultCredentialsProvider(credentialsProvider))
+			.build();
+		return new OpenSearchClient(transport);
+	}
 
-    private static void startTomcat(Servlet transportProvider) {
-        var tomcat = new Tomcat();
-        tomcat.setPort(9200);
+	private static void startTomcat(Servlet transportProvider) {
+		var tomcat = new Tomcat();
+		tomcat.setPort(9200);
 
-        String baseDir = System.getProperty("java.io.tmpdir");
-        tomcat.setBaseDir(baseDir);
+		String baseDir = System.getProperty("java.io.tmpdir");
+		tomcat.setBaseDir(baseDir);
 
-        Context context = tomcat.addContext("", baseDir);
+		Context context = tomcat.addContext("", baseDir);
 
-        // Add transport servlet to Tomcat
-        org.apache.catalina.Wrapper wrapper = context.createWrapper();
-        wrapper.setName("mcpServlet");
-        wrapper.setServlet(transportProvider);
-        wrapper.setLoadOnStartup(1);
-        wrapper.setAsyncSupported(true);
-        context.addChild(wrapper);
-        context.addServletMappingDecoded("/*", "mcpServlet");
+		// Add transport servlet to Tomcat
+		org.apache.catalina.Wrapper wrapper = context.createWrapper();
+		wrapper.setName("mcpServlet");
+		wrapper.setServlet(transportProvider);
+		wrapper.setLoadOnStartup(1);
+		wrapper.setAsyncSupported(true);
+		context.addChild(wrapper);
+		context.addServletMappingDecoded("/*", "mcpServlet");
 
-        var connector = tomcat.getConnector();
-        connector.setAsyncTimeout(3000);
+		var connector = tomcat.getConnector();
+		connector.setAsyncTimeout(3000);
 
-        try {
-            tomcat.start();
-            assert tomcat.getServer().getState().equals(LifecycleState.STARTED);
-        }
-        catch (Exception e) {
-            throw new RuntimeException("Failed to start Tomcat", e);
-        }
-    }
+		try {
+			tomcat.start();
+			assert tomcat.getServer().getState().equals(LifecycleState.STARTED);
+		}
+		catch (Exception e) {
+			throw new RuntimeException("Failed to start Tomcat", e);
+		}
+	}
+
 }

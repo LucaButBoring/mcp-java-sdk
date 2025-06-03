@@ -1,37 +1,50 @@
 package io.modelcontextprotocol.sdk;
 
 import io.modelcontextprotocol.client.McpClient;
-import io.modelcontextprotocol.client.McpSyncClient;
 import io.modelcontextprotocol.client.transport.HttpClientSseClientTransport;
-import io.modelcontextprotocol.spec.McpSchema;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import software.amazon.awssdk.regions.Region;
+import software.amazon.awssdk.services.bedrockruntime.BedrockRuntimeClient;
+
+import java.nio.charset.StandardCharsets;
+import java.util.Scanner;
 
 public class Main {
-    private static final Logger logger = LoggerFactory.getLogger(Main.class);
 
-    public static void main(String[] args) {
-        var transport = HttpClientSseClientTransport.builder("http://localhost:9200")
-                .sseEndpoint("/sse")
-                .build();
-        var mcpClient = McpClient.sync(transport).build();
-        mcpClient.initialize();
+	private static final Logger logger = LoggerFactory.getLogger(Main.class);
 
-        search(mcpClient, "Please read the file from the filesystem.");
-        search(mcpClient, "Please write the file to the filesystem.");
-        search(mcpClient, "Please search for the file I need from the filesystem.");
-        search(mcpClient, "Please search for the information I need from the internet.");
+	public static void main(String[] args) {
+		var transport = HttpClientSseClientTransport.builder("http://localhost:9200").sseEndpoint("/sse").build();
+		var mcpClient = McpClient.sync(transport).build();
+		mcpClient.initialize();
 
-        mcpClient.closeGracefully();
-    }
+		var region = Region.US_WEST_2;
+		var bedrockClient = BedrockRuntimeClient.builder().region(region).build();
 
-    private static void search(McpSyncClient mcpClient, String query) {
-        var response = mcpClient.searchTools(McpSchema.SearchToolsRequest.builder()
-                .query(query)
-                .build());
-        var formattedResponse = String.join("\n", response.tools().stream()
-                .map(tool -> "\t" + tool.name() + ": " + tool.description())
-                .toList());
-        logger.info("Search results for [{}]:\n{}", query, formattedResponse);
-    }
+		// Set up the application and input loop
+		var application = new BedrockMCPApplication(bedrockClient, mcpClient,
+				"us.anthropic.claude-3-7-sonnet-20250219-v1:0", "You are a helpful assistant.");
+		var scanner = new Scanner(System.in, StandardCharsets.UTF_8);
+
+		while (scanner.hasNextLine()) {
+			var line = scanner.nextLine();
+			if (line.startsWith("!") && handleCommand(line)) {
+				break;
+			}
+
+			application.send(line);
+		}
+
+		mcpClient.closeGracefully();
+	}
+
+	private static boolean handleCommand(String command) {
+		if (command.startsWith("!q")) {
+			return false;
+		}
+
+		return true;
+	}
+
 }
