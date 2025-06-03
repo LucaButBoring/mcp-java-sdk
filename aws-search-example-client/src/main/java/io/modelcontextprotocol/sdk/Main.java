@@ -29,7 +29,7 @@ public class Main {
 
 		while (scanner.hasNextLine()) {
 			var line = scanner.nextLine();
-			if (line.startsWith("!") && handleCommand(line)) {
+			if (line.startsWith("!") && !handleCommand(line)) {
 				break;
 			}
 
