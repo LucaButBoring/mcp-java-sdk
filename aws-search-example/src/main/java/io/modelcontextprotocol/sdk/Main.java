@@ -6,7 +6,6 @@ import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.modelcontextprotocol.server.McpServer;
 import io.modelcontextprotocol.server.McpServerFeatures;
-import io.modelcontextprotocol.server.McpSyncServerExchange;
 import io.modelcontextprotocol.server.transport.HttpServletSseServerTransportProvider;
 import io.modelcontextprotocol.spec.McpSchema;
 import jakarta.servlet.Servlet;
@@ -34,11 +33,11 @@ import software.amazon.awssdk.services.bedrockruntime.BedrockRuntimeClient;
 
 import java.io.IOException;
 import java.net.URISyntaxException;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
-import java.util.function.BiFunction;
-import java.util.function.Function;
 
 public class Main {
 
@@ -46,15 +45,32 @@ public class Main {
 
 	private static final ObjectMapper objectMapper = new ObjectMapper();
 
+	private static final McpClientManager clientManager = new McpClientManager();
+
+	@JsonIgnoreProperties(ignoreUnknown = true)
+	private record McpConfig(Map<String, McpStdioServerConfig> mcpServers) {
+		@JsonIgnoreProperties(ignoreUnknown = true)
+		private record McpStdioServerConfig(String command, String[] args, Map<String, String> env) {
+		}
+	}
+
 	public static void main(String[] args) throws IOException, URISyntaxException {
 		var region = Region.US_WEST_2;
 		var endpoint = System.getenv("OS_ENDPOINT");
 		var username = System.getenv("OS_USERNAME");
 		var password = System.getenv("OS_PASSWORD");
+		var configPath = System.getenv("MCP_CONFIG");
+
+		var configRaw = Files.readString(Path.of(configPath));
+		var config = objectMapper.readValue(configRaw, McpConfig.class);
 
 		logger.info("Creating service clients");
 		var openSearchClient = createClient(endpoint, username, password);
 		var bedrockClient = BedrockRuntimeClient.builder().region(region).build();
+
+		config.mcpServers().forEach((k, server) -> {
+			clientManager.addStdioServer(server.command(), server.args(), server.env());
+		});
 
 		logger.info("Starting MCP server");
 		var transportProvider = HttpServletSseServerTransportProvider.builder()
@@ -88,26 +104,31 @@ public class Main {
 		logger.info("MCP server now ready");
 	}
 
+	private static final int SEARCH_RESULTS = 20;
+
+	private static final float MIN_SCORE = 0.4f;
+
 	private static List<McpSchema.Tool> searchTools(OpenSearchClient openSearchClient,
 			BedrockRuntimeClient bedrockClient, String indexName, String query) throws IOException, URISyntaxException {
+
 		// Generate an embedding
 		logger.info("Embedding query: {}", query);
-		var embeddingResponse = embedText(bedrockClient, query, "search_query");
-		float[] embedding = new float[embeddingResponse.size()];
-		for (int i = 0; i < embeddingResponse.size(); i++)
-			embedding[i] = embeddingResponse.get(i);
+		var embedding = embedText(bedrockClient, query, "search_query");
 
 		// kNN search
 		logger.info("Searching index [{}] for query: {}", indexName, query);
-		var searchResponse = openSearchClient.search(request -> request.index(indexName)
-			.size(3)
-			.query(q -> q.knn(knn -> knn.field("embedding").k(3).vector(embedding))), ToolDocument.class);
+		var searchResponse = openSearchClient.search(
+				request -> request.index(indexName)
+					.size(SEARCH_RESULTS)
+					.query(q -> q.knn(knn -> knn.field("embedding").vector(embedding).minScore(MIN_SCORE))),
+				ToolDocument.class);
 		validateSearchResponse(searchResponse);
-		logger.info("Found {} documents", searchResponse.hits().hits().size());
 
-		return searchResponse.hits()
-			.hits()
-			.stream()
+		var hits = searchResponse.hits().hits();
+		logger.info("Found {} documents with a max score of {}", hits.size(),
+				hits.stream().map(Hit::score).filter(Objects::nonNull).max(Double::compareTo).orElse(null));
+
+		return hits.stream()
 			.map(Hit::source)
 			.filter(Objects::nonNull)
 			.map(toolDocument -> new McpSchema.Tool(toolDocument.name(), toolDocument.description(),
@@ -168,7 +189,7 @@ public class Main {
 			var tool = toolSpec.tool();
 
 			// Generate an embedding
-			var embeddingInputText = tool.name() + ": " + tool.description();
+			var embeddingInputText = createToolEmbeddingInput(tool);
 			logger.info("Embedding tool: [{}]", embeddingInputText);
 			var embeddingResponse = embedText(bedrockClient, embeddingInputText, "search_document");
 
@@ -184,11 +205,29 @@ public class Main {
 		return indexName;
 	}
 
+	@SuppressWarnings("unchecked")
+	private static String createToolEmbeddingInput(McpSchema.Tool tool) {
+		var params = tool.inputSchema().properties().entrySet().stream().map(e -> {
+			var description = (String) ((Map<String, Object>) e.getValue()).get("description");
+			if (description == null) {
+				return null;
+			}
+
+			return e.getKey() + ": " + description;
+		}).filter(Objects::nonNull).toList();
+		if (params.isEmpty()) {
+			return tool.name() + ": " + tool.description();
+		}
+
+		return tool.name() + ": " + tool.description() + "\nParameters:\n" + String.join("\n", params);
+	}
+
 	private static List<Float> embedText(BedrockRuntimeClient bedrockClient, String text, String type)
 			throws JsonProcessingException {
-		var embeddingRequest = "{ \"inputText\": \"{{inputText}}\", \"dimensions\": 256 }";
+		var embeddingRequest = new EmbeddingRequest(text, 256);
+		var embeddingRequestRaw = objectMapper.writeValueAsString(embeddingRequest);
 		var embeddingResponse = bedrockClient.invokeModel(request -> request.modelId("amazon.titan-embed-text-v2:0")
-			.body(SdkBytes.fromUtf8String(embeddingRequest.replace("{{inputText}}", text)))
+			.body(SdkBytes.fromUtf8String(embeddingRequestRaw))
 			.accept("*/*")
 			.contentType("application/json")
 			.build());
@@ -200,54 +239,29 @@ public class Main {
 	}
 
 	@JsonIgnoreProperties(ignoreUnknown = true)
+	private record EmbeddingRequest(String inputText, int dimensions) {
+	}
+
+	@JsonIgnoreProperties(ignoreUnknown = true)
 	private record EmbeddingResult(@JsonProperty("embedding") List<Float> embedding) {
 	}
 
 	private static List<McpServerFeatures.SyncToolSpecification> createTools() {
-		// Create some dummy tools that do trivial work
-		return List.of(
-				createSingleArgToolSpec("search_websites", "Searches the internet for information.",
-						(value) -> "This is a useful response."),
-				createSingleArgToolSpec("search_files", "Searches the filesystem for matching files.",
-						(value) -> "Found files: [/var/log/mcp.log]"),
-				createSingleArgToolSpec("read_file", "Reads a file from the filesystem.", (value) -> "Hello, world!"),
-				createSingleArgToolSpec("read_files", "Reads multiple files from the filesystem.",
-						(value) -> "All files contained the same content: [Hello, world!]"),
-				createSingleArgToolSpec("write_file", "Writes a file to the filesystem.", (value) -> "success"),
-				createSingleArgToolSpec("write_files", "Writes multiple files to the filesystem.",
-						(value) -> "success"));
+		var tools = clientManager.listAllTools();
+		return tools.stream().map(Main::createProxyToolSpec).toList();
 	}
 
-	private static McpServerFeatures.SyncToolSpecification createSingleArgToolSpec(String name, String description,
-			Function<String, String> executeTool) {
-		return new McpServerFeatures.SyncToolSpecification(
-				new McpSchema.Tool(name, description, SINGLE_ARG_JSON_SCHEMA), (ex, params) -> {
-					try {
-						var arg = params.get("value");
-						var result = executeTool.apply((String) arg);
-						return McpSchema.CallToolResult.builder().addTextContent(result).build();
-					}
-					catch (final Exception e) {
-						logger.error(e.getMessage(), e);
-						throw e;
-					}
-				});
-	}
-
-	private static final String SINGLE_ARG_JSON_SCHEMA = """
-			{
-				"$schema": "http://json-schema.org/draft-07/schema#",
-				"type": "object",
-				"properties": {
-				    "value": {
-				        "type": "string"
-				    }
-				}
+	private static McpServerFeatures.SyncToolSpecification createProxyToolSpec(McpSchema.Tool tool) {
+		return new McpServerFeatures.SyncToolSpecification(tool, (ex, params) -> {
+			try {
+				return clientManager.callTool(new McpSchema.CallToolRequest(tool.name(), params));
 			}
-			""";
-
-	private static final BiFunction<McpSyncServerExchange, Map<String, Object>, McpSchema.CallToolResult> DUMMY_HANDLER = (
-			e, r) -> McpSchema.CallToolResult.builder().addTextContent("success").build();
+			catch (final Exception e) {
+				logger.error(e.getMessage(), e);
+				throw e;
+			}
+		});
+	}
 
 	private static OpenSearchClient createClient(String endpoint, String username, String password)
 			throws URISyntaxException {

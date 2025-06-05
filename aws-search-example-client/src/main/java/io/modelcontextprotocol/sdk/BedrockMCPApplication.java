@@ -1,10 +1,10 @@
 package io.modelcontextprotocol.sdk;
 
 import io.modelcontextprotocol.client.McpSyncClient;
+import io.modelcontextprotocol.spec.McpError;
 import io.modelcontextprotocol.spec.McpSchema;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-import software.amazon.awssdk.core.document.Document;
 import software.amazon.awssdk.services.bedrockruntime.BedrockRuntimeClient;
 import software.amazon.awssdk.services.bedrockruntime.model.*;
 
@@ -16,37 +16,47 @@ public class BedrockMCPApplication {
 
 	private final String systemPrompt;
 
-	private final String modelId;
-
 	private final Stack<Message> messages;
-
-	private final BedrockRuntimeClient bedrockRuntimeClient;
 
 	private final McpSyncClient mcpClient;
 
-	public BedrockMCPApplication(BedrockRuntimeClient bedrockRuntimeClient, McpSyncClient mcpClient, String modelId,
-			String systemPrompt) {
-		this.bedrockRuntimeClient = bedrockRuntimeClient;
+	private final MiniConverseClient converseClient;
+
+	public BedrockMCPApplication(BedrockRuntimeClient bedrockRuntimeClient, McpSyncClient mcpClient,
+			List<String> modelIds, String systemPrompt) {
+		this.converseClient = new MiniConverseClient(bedrockRuntimeClient, modelIds);
 		this.mcpClient = mcpClient;
-		this.modelId = modelId;
 		this.systemPrompt = systemPrompt.replaceAll("\\v+", "\\\\n");
 		this.messages = new Stack<>();
 	}
 
-	public void send(String message) {
-		message = message.replaceAll("\\v+", "\\\\n");
-		var tools = searchTools(message);
+	public void send(String message) throws InterruptedException {
 		addUserMessage(message);
 
 		ConverseResponse converseResponse;
 		do {
-			var converseRequest = createConverseRequest(modelId, tools);
-			converseResponse = bedrockRuntimeClient.converse(converseRequest);
+			// Try to include the most recent message as search context
+			var lastMessage = getLastAssistantMessage();
+			var query = buildSearchQuery(message, lastMessage);
+			var tools = searchTools(query);
+
+			var converseRequest = converseClient.createConverseRequest(messages, tools, systemPrompt);
+			converseResponse = converseClient.doConverse(converseRequest);
 		}
 		while (handleConverseResponse(converseResponse));
 	}
 
-	private boolean handleConverseResponse(ConverseResponse converseResponse) {
+	private Message getLastAssistantMessage() {
+		for (var message : getMessagesReversed()) {
+			if (message.role() == ConversationRole.ASSISTANT) {
+				return message;
+			}
+		}
+
+		return null;
+	}
+
+	private boolean handleConverseResponse(ConverseResponse converseResponse) throws InterruptedException {
 		addMessage(converseResponse.output().message());
 		printMessage(converseResponse.output().message());
 
@@ -57,10 +67,18 @@ public class BedrockMCPApplication {
 				return false;
 			}
 
-			var toolResult = mcpClient
-				.callTool(new McpSchema.CallToolRequest(toolRequest.name(), toolRequest.input().toString()));
-			addToolResultMessage(toolRequest.toolUseId(), toolResult);
-			return true;
+			Thread.sleep(1000); // Throttle here since we're going to send another request
+			try {
+				var toolResult = mcpClient
+					.callTool(new McpSchema.CallToolRequest(toolRequest.name(), toolRequest.input().toString()));
+				addToolResultMessage(toolRequest.toolUseId(), toolResult);
+				return true; // Send follow-up request
+			}
+			catch (McpError e) {
+				logger.error("Failed to call tool {}", toolRequest.name(), e);
+				addToolResultError(toolRequest.toolUseId(), e);
+				return true;
+			}
 		}
 
 		return false;
@@ -101,17 +119,15 @@ public class BedrockMCPApplication {
 		return null;
 	}
 
-	private List<McpSchema.Tool> searchTools(String query) {
-		// Try to include the most recent message as context
-		var lastMessage = messages.isEmpty() ? null : messages.peek();
-		var fullQuery = lastMessage != null ? getText(lastMessage) + "\n" + query : query;
-		fullQuery = fullQuery.replaceAll("\\v+", "\\\\n");
+	private String buildSearchQuery(String query, Message lastMessage) {
+		var fullQuery = lastMessage != null ? query + "\n" + getText(lastMessage) : query;
+		return fullQuery.replaceAll("\\v+", "\\\\n");
+	}
 
-		// Do the search
-		var response = mcpClient.searchTools(McpSchema.SearchToolsRequest.builder().query(fullQuery).build());
-		var formattedResponse = String.join("\n",
-				response.tools().stream().map(tool -> "\t" + tool.name() + ": " + tool.description()).toList());
-		logger.info("Search results for [{}]:\n{}", query, formattedResponse);
+	private List<McpSchema.Tool> searchTools(String query) {
+		var response = mcpClient.searchTools(McpSchema.SearchToolsRequest.builder().query(query).build());
+		logger.info("Search results for [{}]:\n{}", query,
+				String.join("\n", response.tools().stream().map(tool -> "\t" + tool.name()).toList()));
 		return response.tools();
 	}
 
@@ -130,7 +146,22 @@ public class BedrockMCPApplication {
 			.build());
 	}
 
+	private void addToolResultError(String toolUseId, McpError error) {
+		addMessage(Message.builder()
+			.role("user")
+			.content(List.of(ContentBlock.fromToolResult(ToolResultBlock.builder()
+				.toolUseId(toolUseId)
+				.status(ToolResultStatus.ERROR)
+				.content(List.of(ToolResultContentBlock.fromText(error.getMessage())))
+				.build())))
+			.build());
+	}
+
 	private List<ToolResultContentBlock> mcpContentToBedrockContent(List<McpSchema.Content> content) {
+		if (content == null || content.isEmpty()) {
+			return Collections.emptyList();
+		}
+
 		return content.stream().map(c -> {
 			if (c instanceof McpSchema.TextContent t) {
 				return ToolResultContentBlock.fromText(t.text());
@@ -156,82 +187,12 @@ public class BedrockMCPApplication {
 		return sb.toString();
 	}
 
-	private ConverseRequest createConverseRequest(String modelId, List<McpSchema.Tool> tools) {
-		return ConverseRequest.builder()
-			.modelId(modelId)
-			.system(List.of(SystemContentBlock.fromText(systemPrompt)))
-			.messages(messages)
-			.toolConfig(ToolConfiguration.builder()
-				.tools(tools.stream()
-					.map(tool -> Tool.fromToolSpec(ToolSpecification.builder()
-						.name(tool.name())
-						.description(tool.description())
-						.inputSchema(ToolInputSchema.builder().json(schemaToDocument(tool.inputSchema())).build())
-						.build()))
-					.toList())
-				.build())
-			.build();
-	}
-
-	private static Document schemaToDocument(McpSchema.JsonSchema schema) {
-		return Document.mapBuilder()
-			.putDocument("type", objectToDocument(schema.type()))
-			.putDocument("properties", objectToDocument(schema.properties()))
-			.putDocument("required", objectToDocument(schema.required(), Document.fromList(List.of())))
-			.putDocument("additionalProperties", objectToDocument(schema.additionalProperties()))
-			.putDocument("$defs", objectToDocument(schema.defs(), Document.fromMap(Map.of())))
-			.putDocument("definitions", objectToDocument(schema.definitions(), Document.fromMap(Map.of())))
-			.build();
-	}
-
-	private static Document objectToDocument(Object object, Document defaultValue) {
-		var result = objectToDocument(object);
-		if (result.isNull()) {
-			return defaultValue;
+	private Stack<Message> getMessagesReversed() {
+		Stack<Message> reversedMessages = new Stack<>();
+		for (var message : messages) {
+			reversedMessages.push(message);
 		}
-
-		return result;
-	}
-
-	@SuppressWarnings("unchecked lol")
-	private static Document objectToDocument(Object object) {
-		if (object instanceof Document d) {
-			return d;
-		}
-		else if (object instanceof String s) {
-			return Document.fromString(s);
-		}
-		else if (object instanceof Boolean b) {
-			return Document.fromBoolean(b);
-		}
-		else if (object instanceof Integer i) {
-			return Document.fromNumber(i);
-		}
-		else if (object instanceof Long l) {
-			return Document.fromNumber(l);
-		}
-		else if (object instanceof List<?> list) {
-			return Document.fromList(list.stream().map(BedrockMCPApplication::objectToDocument).toList());
-		}
-		else if (object instanceof Map<?, ?> map) {
-			// Just assume this is a string map because that's all we ever use in
-			// JSONSchema, lazy code
-			var mapClone = new HashMap<String, Object>((Map<String, ?>) map);
-			mapClone.replaceAll((k, v) -> {
-				if (!(k instanceof String)) {
-					throw new IllegalArgumentException("Map keys must be strings");
-				}
-
-				return objectToDocument(v);
-			});
-			return Document.fromMap((Map<String, Document>) (Map<String, ?>) mapClone);
-		}
-		else if (Objects.isNull(object)) {
-			return Document.fromNull();
-		}
-		else {
-			throw new IllegalArgumentException("Unsupported object type: " + object.getClass());
-		}
+		return reversedMessages;
 	}
 
 }
