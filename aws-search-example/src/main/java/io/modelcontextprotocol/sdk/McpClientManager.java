@@ -41,6 +41,7 @@ public class McpClientManager {
 	private void loadTools(McpSyncClient client) {
 		var tools = listTools(client);
 		for (var tool : tools) {
+			assert !toolReverseMap.containsKey(tool.name());
 			toolReverseMap.put(tool.name(), client);
 		}
 	}
