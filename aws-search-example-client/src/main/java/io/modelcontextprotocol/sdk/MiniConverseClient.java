@@ -125,6 +125,12 @@ public class MiniConverseClient {
 		else if (object instanceof Long l) {
 			return Document.fromNumber(l);
 		}
+		else if (object instanceof Float f) {
+			return Document.fromNumber(f);
+		}
+		else if (object instanceof Double d) {
+			return Document.fromNumber(d);
+		}
 		else if (object instanceof List<?> list) {
 			return Document.fromList(list.stream().map(MiniConverseClient::objectToDocument).toList());
 		}
