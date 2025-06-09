@@ -18,10 +18,12 @@ public class Main {
 	public static void main(String[] args) throws InterruptedException {
 		logger.info("Creating service clients");
 
+		// Create a connection to our MCP server
 		var transport = HttpClientSseClientTransport.builder("http://localhost:9200").sseEndpoint("/sse").build();
 		var mcpClient = McpClient.sync(transport).build();
 		mcpClient.initialize();
 
+		// Create a Bedrock client for calling the LLM
 		var region = Region.US_WEST_2;
 		var bedrockClient = BedrockRuntimeClient.builder().region(region).build();
 

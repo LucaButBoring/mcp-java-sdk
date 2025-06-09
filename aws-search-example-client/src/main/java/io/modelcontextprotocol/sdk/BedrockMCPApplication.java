@@ -30,6 +30,10 @@ public class BedrockMCPApplication {
 		this.messages = new Stack<>();
 	}
 
+	/**
+	 * Sends a user message to the agent.
+	 * @param message The user message.
+	 */
 	public void send(String message) throws InterruptedException {
 		addUserMessage(message);
 
@@ -40,9 +44,10 @@ public class BedrockMCPApplication {
 			var query = buildSearchQuery(message, lastMessage);
 			var tools = searchTools(query);
 
+			// Dispatch the request
 			var converseRequest = converseClient.createConverseRequest(messages, tools, systemPrompt);
 			converseResponse = converseClient.doConverse(converseRequest);
-		}
+		} // Handle the response, which may involve another iteration
 		while (handleConverseResponse(converseResponse));
 	}
 
@@ -56,11 +61,17 @@ public class BedrockMCPApplication {
 		return null;
 	}
 
+	/**
+	 * Handles the response from calling Converse.
+	 * @param converseResponse The response object.
+	 * @return true if a follow-up call should be made; otherwise false
+	 */
 	private boolean handleConverseResponse(ConverseResponse converseResponse) throws InterruptedException {
 		addMessage(converseResponse.output().message());
-		printMessage(converseResponse.output().message());
+		printMessage(converseResponse.output().message()); // Display in the console
 
 		if (converseResponse.stopReason() == StopReason.TOOL_USE) {
+			// Extract the tool call request
 			var toolRequest = getToolRequest(converseResponse.output().message());
 			if (toolRequest == null) {
 				logger.warn("Tool request is null");
@@ -69,19 +80,20 @@ public class BedrockMCPApplication {
 
 			Thread.sleep(1000); // Throttle here since we're going to send another request
 			try {
+				// Call the tool
 				var toolResult = mcpClient
 					.callTool(new McpSchema.CallToolRequest(toolRequest.name(), toolRequest.input().toString()));
 				addToolResultMessage(toolRequest.toolUseId(), toolResult);
-				return true; // Send follow-up request
 			}
 			catch (McpError e) {
 				logger.error("Failed to call tool {}", toolRequest.name(), e);
 				addToolResultError(toolRequest.toolUseId(), e);
-				return true;
 			}
+
+			return true; // Send follow-up request
 		}
 
-		return false;
+		return false; // Do not send follow-up request
 	}
 
 	private void printMessage(Message message) {
@@ -125,6 +137,7 @@ public class BedrockMCPApplication {
 	}
 
 	private List<McpSchema.Tool> searchTools(String query) {
+		// Search the server for tools matching the provided query
 		var response = mcpClient.searchTools(McpSchema.SearchToolsRequest.builder().query(query).build());
 		logger.info("Search results for [{}]:\n{}", query,
 				String.join("\n", response.tools().stream().map(tool -> "\t" + tool.name()).toList()));

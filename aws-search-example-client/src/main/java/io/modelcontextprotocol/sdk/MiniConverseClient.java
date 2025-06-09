@@ -43,6 +43,7 @@ public class MiniConverseClient {
 			// Reuse a model until we get throttled heavily again
 			currentModelIdx = (currentModelIdx + n) % modelFallbackOrder.size();
 
+			// Get the current model from the fallback list
 			var modelId = modelFallbackOrder.get(currentModelIdx);
 			if (!modelId.equals(request.modelId())) {
 				logger.warn("Throttled by Converse; falling back to model {}", modelId);
@@ -70,9 +71,11 @@ public class MiniConverseClient {
 	public ConverseRequest createConverseRequest(List<Message> messages, List<McpSchema.Tool> tools,
 			String systemPrompt) {
 		return ConverseRequest.builder()
+			// Get the current model from our fallback list
 			.modelId(modelFallbackOrder.get(currentModelIdx))
 			.system(List.of(SystemContentBlock.fromText(systemPrompt)))
 			.messages(messages)
+			// Map tools
 			.toolConfig(tools.isEmpty() ? null : ToolConfiguration.builder()
 				.tools(tools.stream()
 					.map(tool -> Tool.fromToolSpec(ToolSpecification.builder()

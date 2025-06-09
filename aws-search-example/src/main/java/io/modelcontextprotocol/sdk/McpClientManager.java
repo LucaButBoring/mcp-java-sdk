@@ -16,6 +16,7 @@ public class McpClientManager {
 
 	private final List<McpSyncClient> clients;
 
+	/** Map from tool names to client instances. */
 	private final Map<String, McpSyncClient> toolReverseMap;
 
 	public McpClientManager() {
@@ -23,6 +24,12 @@ public class McpClientManager {
 		toolReverseMap = new HashMap<>();
 	}
 
+	/**
+	 * Adds a stdio server to this client manager.
+	 * @param command The command to start the server with.
+	 * @param args The server command-line args.
+	 * @param env The environment variables.
+	 */
 	public void addStdioServer(String command, String[] args, Map<String, String> env) {
 		var transport = new StdioClientTransport(ServerParameters.builder(command).args(args).env(env).build());
 		var client = McpClient.sync(transport).build();
@@ -32,6 +39,11 @@ public class McpClientManager {
 		loadTools(client);
 	}
 
+	/**
+	 * Calls a loaded tool.
+	 * @param request The CallTool request.
+	 * @return The corresponding result.
+	 */
 	public McpSchema.CallToolResult callTool(McpSchema.CallToolRequest request) {
 		// Get the appropriate client by tool name
 		var client = Optional.ofNullable(toolReverseMap.get(request.name())).orElseThrow();
