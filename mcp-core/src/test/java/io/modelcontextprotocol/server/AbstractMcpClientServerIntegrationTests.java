@@ -2573,15 +2573,12 @@ public abstract class AbstractMcpClientServerIntegrationTests {
 	 */
 	private <T extends McpSchema.ClientTaskPayloadResult> Mono<T> pollForTaskCompletion(McpAsyncServerExchange exchange,
 			String taskId, TypeRef<T> resultTypeRef) {
-		return Mono.defer(() -> exchange.getTask(McpSchema.GetTaskRequest.builder().taskId(taskId).build()))
-			.flatMap(task -> {
-				if (task.status().isTerminal()) {
-					return exchange.getTaskResult(McpSchema.GetTaskPayloadRequest.builder().taskId(taskId).build(),
-							resultTypeRef);
-				}
-				return Mono.delay(Duration.ofMillis(100)).then(pollForTaskCompletion(exchange, taskId, resultTypeRef));
-			})
-			.timeout(Duration.ofSeconds(30));
+		return Mono.defer(() -> exchange.getTask(taskId)).flatMap(task -> {
+			if (task.status().isTerminal()) {
+				return exchange.getTaskResult(taskId, resultTypeRef);
+			}
+			return Mono.delay(Duration.ofMillis(100)).then(pollForTaskCompletion(exchange, taskId, resultTypeRef));
+		}).timeout(Duration.ofSeconds(30));
 	}
 
 	/**
