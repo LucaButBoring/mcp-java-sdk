@@ -21,7 +21,6 @@ import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.BiFunction;
 import java.util.function.Function;
 import java.util.stream.Collectors;
-import java.util.stream.Stream;
 
 import io.modelcontextprotocol.client.McpClient;
 import io.modelcontextprotocol.client.McpSyncClient;
@@ -1883,8 +1882,7 @@ public abstract class AbstractMcpClientServerIntegrationTests {
 	}
 
 	/** Extracts the task ID from a list of response messages. */
-	protected String extractTaskId(Stream<ResponseMessage<CallToolResult>> messageStream) {
-		List<ResponseMessage<CallToolResult>> messages = messageStream.toList();
+	protected String extractTaskId(List<ResponseMessage<CallToolResult>> messages) {
 		for (var msg : messages) {
 			if (msg instanceof TaskCreatedMessage<CallToolResult> tcm) {
 				return tcm.task().taskId();
@@ -1894,8 +1892,7 @@ public abstract class AbstractMcpClientServerIntegrationTests {
 	}
 
 	/** Extracts all task statuses from a list of response messages. */
-	protected List<TaskStatus> extractTaskStatuses(Stream<ResponseMessage<CallToolResult>> messageStream) {
-		List<ResponseMessage<CallToolResult>> messages = messageStream.toList();
+	protected List<TaskStatus> extractTaskStatuses(List<ResponseMessage<CallToolResult>> messages) {
 		List<TaskStatus> statuses = new ArrayList<>();
 		for (var msg : messages) {
 			if (msg instanceof TaskCreatedMessage<CallToolResult> tcm) {
@@ -2018,7 +2015,7 @@ public abstract class AbstractMcpClientServerIntegrationTests {
 			client.initialize();
 
 			var request = new McpSchema.CallToolRequest("needs-input-tool", Map.of(), DEFAULT_TASK_METADATA, null);
-			var messages = client.callToolStream(request);
+			var messages = client.callToolStream(request).toList();
 			var observedStates = extractTaskStatuses(messages);
 
 			assertThat(taskIdRef.get()).as("Task ID should have been set").isNotNull();
@@ -2157,7 +2154,7 @@ public abstract class AbstractMcpClientServerIntegrationTests {
 
 			// Call with task metadata - should use createTaskHandler directly
 			var request = new McpSchema.CallToolRequest("create-task-tool", Map.of(), DEFAULT_TASK_METADATA, null);
-			var messages = client.callToolStream(request);
+			var messages = client.callToolStream(request).toList();
 
 			assertThat(createTaskHandlerInvoked.get()).as("createTaskHandler should have been invoked").isTrue();
 			assertThat(messages).as("Should have response messages").isNotEmpty();
