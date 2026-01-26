@@ -113,18 +113,13 @@ public class ExampleClient {
 				.build();
 
 			// Use callToolStream to handle the full task lifecycle
+			// Process messages as they arrive from the stream
 			logger.info("[CLIENT] Starting callToolStream...");
 
-			var messages = client.callToolStream(request).toList();
-
-			logger.info("[CLIENT] ========================================");
-			logger.info("[CLIENT] Stream completed. Processing {} messages...", messages.size());
-			logger.info("[CLIENT] ========================================");
-
-			// Process all messages
-			for (int i = 0; i < messages.size(); i++) {
-				ResponseMessage<CallToolResult> message = messages.get(i);
-				logger.info("[CLIENT] Message {}/{}: {}", i + 1, messages.size(), message.getClass().getSimpleName());
+			AtomicInteger messageCount = new AtomicInteger(0);
+			client.callToolStream(request).forEach(message -> {
+				int msgNum = messageCount.incrementAndGet();
+				logger.info("[CLIENT] Message {}: {}", msgNum, message.getClass().getSimpleName());
 
 				if (message instanceof TaskCreatedMessage<?> tcm) {
 					logger.info("[CLIENT]   -> Task created: {}", tcm.task().taskId());
@@ -152,7 +147,10 @@ public class ExampleClient {
 				else {
 					logger.info("[CLIENT]   -> Unknown message type: {}", message);
 				}
-			}
+			});
+
+			logger.info("[CLIENT] ========================================");
+			logger.info("[CLIENT] Stream completed. Total messages: {}", messageCount.get());
 
 			logger.info("[CLIENT] ========================================");
 			logger.info("[CLIENT] Example completed successfully!");
