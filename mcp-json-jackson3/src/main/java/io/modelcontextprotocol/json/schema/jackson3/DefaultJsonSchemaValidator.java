@@ -1,15 +1,12 @@
 /*
- * Copyright 2024-2024 the original author or authors.
+ * Copyright 2026-2026 the original author or authors.
  */
-package io.modelcontextprotocol.json.schema.jackson;
+package io.modelcontextprotocol.json.schema.jackson3;
 
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 
-import com.fasterxml.jackson.core.JsonProcessingException;
-import com.fasterxml.jackson.databind.JsonNode;
-import com.fasterxml.jackson.databind.ObjectMapper;
 import com.networknt.schema.Schema;
 import com.networknt.schema.SchemaRegistry;
 import com.networknt.schema.Error;
@@ -18,22 +15,22 @@ import io.modelcontextprotocol.json.schema.JsonSchemaValidator;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import tools.jackson.core.JacksonException;
+import tools.jackson.databind.JsonNode;
+import tools.jackson.databind.json.JsonMapper;
+
 /**
  * Default implementation of the {@link JsonSchemaValidator} interface. This class
  * provides methods to validate structured content against a JSON schema. It uses the
  * NetworkNT JSON Schema Validator library for validation.
  *
- * @author Christian Tzolov
- * @deprecated since 18.0.0, use
- * {@link io.modelcontextprotocol.json.schema.jackson2.DefaultJsonSchemaValidator}
- * instead. Will be removed in 19.0.0.
+ * @author Filip Hrisafov
  */
-@Deprecated(forRemoval = true, since = "18.0.0")
 public class DefaultJsonSchemaValidator implements JsonSchemaValidator {
 
 	private static final Logger logger = LoggerFactory.getLogger(DefaultJsonSchemaValidator.class);
 
-	private final ObjectMapper objectMapper;
+	private final JsonMapper jsonMapper;
 
 	private final SchemaRegistry schemaFactory;
 
@@ -41,11 +38,11 @@ public class DefaultJsonSchemaValidator implements JsonSchemaValidator {
 	private final ConcurrentHashMap<String, Schema> schemaCache;
 
 	public DefaultJsonSchemaValidator() {
-		this(new ObjectMapper());
+		this(JsonMapper.shared());
 	}
 
-	public DefaultJsonSchemaValidator(ObjectMapper objectMapper) {
-		this.objectMapper = objectMapper;
+	public DefaultJsonSchemaValidator(JsonMapper jsonMapper) {
+		this.jsonMapper = jsonMapper;
 		this.schemaFactory = SchemaRegistry.withDialect(Dialects.getDraft202012());
 		this.schemaCache = new ConcurrentHashMap<>();
 	}
@@ -63,8 +60,8 @@ public class DefaultJsonSchemaValidator implements JsonSchemaValidator {
 		try {
 
 			JsonNode jsonStructuredOutput = (structuredContent instanceof String)
-					? this.objectMapper.readTree((String) structuredContent)
-					: this.objectMapper.valueToTree(structuredContent);
+					? this.jsonMapper.readTree((String) structuredContent)
+					: this.jsonMapper.valueToTree(structuredContent);
 
 			List<Error> validationResult = this.getOrCreateJsonSchema(schema).validate(jsonStructuredOutput);
 
@@ -78,7 +75,7 @@ public class DefaultJsonSchemaValidator implements JsonSchemaValidator {
 			return ValidationResponse.asValid(jsonStructuredOutput.toString());
 
 		}
-		catch (JsonProcessingException e) {
+		catch (JacksonException e) {
 			logger.error("Failed to validate CallToolResult: Error parsing schema: {}", e);
 			return ValidationResponse.asInvalid("Error parsing tool JSON Schema: " + e.getMessage());
 		}
@@ -92,9 +89,9 @@ public class DefaultJsonSchemaValidator implements JsonSchemaValidator {
 	 * Gets a cached Schema or creates and caches a new one.
 	 * @param schema the schema map to convert
 	 * @return the compiled Schema
-	 * @throws JsonProcessingException if schema processing fails
+	 * @throws JacksonException if schema processing fails
 	 */
-	private Schema getOrCreateJsonSchema(Map<String, Object> schema) throws JsonProcessingException {
+	private Schema getOrCreateJsonSchema(Map<String, Object> schema) throws JacksonException {
 		// Generate cache key based on schema content
 		String cacheKey = this.generateCacheKey(schema);
 
@@ -116,16 +113,16 @@ public class DefaultJsonSchemaValidator implements JsonSchemaValidator {
 	 * Creates a new Schema from the given schema map.
 	 * @param schema the schema map
 	 * @return the compiled Schema
-	 * @throws JsonProcessingException if schema processing fails
+	 * @throws JacksonException if schema processing fails
 	 */
-	private Schema createJsonSchema(Map<String, Object> schema) throws JsonProcessingException {
+	private Schema createJsonSchema(Map<String, Object> schema) throws JacksonException {
 		// Convert schema map directly to JsonNode (more efficient than string
 		// serialization)
-		JsonNode schemaNode = this.objectMapper.valueToTree(schema);
+		JsonNode schemaNode = this.jsonMapper.valueToTree(schema);
 
 		// Handle case where ObjectMapper might return null (e.g., in mocked scenarios)
 		if (schemaNode == null) {
-			throw new JsonProcessingException("Failed to convert schema to JsonNode") {
+			throw new JacksonException("Failed to convert schema to JsonNode") {
 			};
 		}
 
