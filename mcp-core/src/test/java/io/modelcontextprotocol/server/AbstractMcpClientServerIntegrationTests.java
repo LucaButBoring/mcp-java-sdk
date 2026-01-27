@@ -2060,6 +2060,23 @@ public abstract class AbstractMcpClientServerIntegrationTests {
 					.contains(TaskStatus.INPUT_REQUIRED);
 
 				assertValidStateTransitions(observedStates);
+
+				// Verify related-task metadata is present in the result
+				var resultMessage = messages.stream()
+					.filter(m -> m instanceof ResultMessage<?>)
+					.map(m -> (ResultMessage<CallToolResult>) m)
+					.findFirst();
+				assertThat(resultMessage).as("Should have a result message").isPresent();
+				assertThat(resultMessage.get().result().meta()).as("Result should include related-task metadata")
+					.isNotNull()
+					.containsKey(McpSchema.RELATED_TASK_META_KEY);
+				@SuppressWarnings("unchecked")
+				var relatedTaskMeta = (Map<String, Object>) resultMessage.get()
+					.result()
+					.meta()
+					.get(McpSchema.RELATED_TASK_META_KEY);
+				assertThat(relatedTaskMeta.get("taskId")).as("Related task metadata should contain the correct taskId")
+					.isEqualTo(taskIdRef.get());
 			}
 		}
 		finally {
@@ -2170,6 +2187,28 @@ public abstract class AbstractMcpClientServerIntegrationTests {
 
 				assertThat(receivedProgressNotifications).as("Should receive progress notifications via side-channel")
 					.hasSizeGreaterThanOrEqualTo(1);
+
+				// Verify logging notifications include related-task metadata
+				for (var logNotif : receivedLoggingNotifications) {
+					assertThat(logNotif.meta()).as("Logging notification should include related-task metadata")
+						.isNotNull()
+						.containsKey(McpSchema.RELATED_TASK_META_KEY);
+					@SuppressWarnings("unchecked")
+					var relatedTask = (Map<String, Object>) logNotif.meta().get(McpSchema.RELATED_TASK_META_KEY);
+					assertThat(relatedTask.get("taskId")).as("Related task metadata should contain the correct taskId")
+						.isEqualTo(taskIdRef.get());
+				}
+
+				// Verify progress notifications include related-task metadata
+				for (var progressNotif : receivedProgressNotifications) {
+					assertThat(progressNotif.meta()).as("Progress notification should include related-task metadata")
+						.isNotNull()
+						.containsKey(McpSchema.RELATED_TASK_META_KEY);
+					@SuppressWarnings("unchecked")
+					var relatedTask = (Map<String, Object>) progressNotif.meta().get(McpSchema.RELATED_TASK_META_KEY);
+					assertThat(relatedTask.get("taskId")).as("Related task metadata should contain the correct taskId")
+						.isEqualTo(taskIdRef.get());
+				}
 
 				// Verify the task went through INPUT_REQUIRED (side-channeling trigger)
 				assertThat(observedStates).as("Task should transition through INPUT_REQUIRED for side-channeling")
