@@ -110,6 +110,7 @@
 		<module>mcp-bom</module>
 		<module>mcp</module>
 		<module>mcp-core</module>
+		<module>mcp-transport-http-over-stdio</module>
 		<module>mcp-json-jackson2</module>
 		<module>mcp-json-jackson3</module>
 		<module>mcp-test</module>
