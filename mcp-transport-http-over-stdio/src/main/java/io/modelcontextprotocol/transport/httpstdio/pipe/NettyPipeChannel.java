@@ -83,6 +83,18 @@ public final class NettyPipeChannel extends AbstractChannel {
 
 	private volatile ChannelPromise shutdownOutputPromise;
 
+	/** Flushed messages currently owned by the writer thread. Event-loop confined. */
+	private int handedOff;
+
+	/** Whether shutdownOutput() is draining. Event-loop confined. */
+	private boolean shutdownPending;
+
+	/**
+	 * Flushed messages that were outstanding when shutdownOutput() was requested and have
+	 * not yet been written. Event-loop confined.
+	 */
+	private int drainRemaining;
+
 	public NettyPipeChannel(DuplexByteChannel duplex) {
 		super(null);
 		this.duplex = Objects.requireNonNull(duplex, "duplex");
@@ -132,6 +144,12 @@ public final class NettyPipeChannel extends AbstractChannel {
 				this.writerBlockedNanos.get());
 	}
 
+	/**
+	 * Closes the write direction after every message flushed before this call has been
+	 * written to the pipe. Messages flushed after this call fail with
+	 * {@link ClosedChannelException}. Inbound reading is unaffected.
+	 * @return a future completed once the pipe's write direction has been closed
+	 */
 	public ChannelFuture shutdownOutput() {
 		EventLoop loop = eventLoop();
 		ChannelPromise promise = newPromise();
@@ -144,11 +162,23 @@ public final class NettyPipeChannel extends AbstractChannel {
 				promise.trySuccess();
 				return;
 			}
-			this.shutdownOutputPromise = promise;
-			this.outputShutdownRequested.set(true);
-			synchronized (this.writeMonitor) {
-				this.writeMonitor.notifyAll();
+			if (this.shutdownPending) {
+				this.shutdownOutputPromise.addListener(future -> {
+					if (future.isSuccess()) {
+						promise.trySuccess();
+					}
+					else {
+						promise.tryFailure(future.cause());
+					}
+				});
+				return;
 			}
+			this.shutdownPending = true;
+			this.shutdownOutputPromise = promise;
+			ChannelOutboundBuffer in = unsafe().outboundBuffer();
+			this.drainRemaining = in == null ? 0 : in.size();
+			resumeFlush();
+			maybeSignalOutputShutdown();
 		};
 		if (loop.inEventLoop()) {
 			request.run();
@@ -161,12 +191,28 @@ public final class NettyPipeChannel extends AbstractChannel {
 
 	@Override
 	protected AbstractUnsafe newUnsafe() {
-		return new AbstractUnsafe() {
-			@Override
-			public void connect(SocketAddress remoteAddress, SocketAddress localAddress, ChannelPromise promise) {
-				promise.tryFailure(new UnsupportedOperationException("Pipe channels are connected at construction"));
-			}
-		};
+		return new PipeUnsafe();
+	}
+
+	/**
+	 * Exposes {@code flush0()}, which re-runs {@code doWrite} without promoting unflushed
+	 * writes.
+	 */
+	private final class PipeUnsafe extends AbstractUnsafe {
+
+		@Override
+		public void connect(SocketAddress remoteAddress, SocketAddress localAddress, ChannelPromise promise) {
+			promise.tryFailure(new UnsupportedOperationException("Pipe channels are connected at construction"));
+		}
+
+		void resumeFlush() {
+			flush0();
+		}
+
+	}
+
+	private void resumeFlush() {
+		((PipeUnsafe) unsafe()).resumeFlush();
 	}
 
 	@Override
@@ -227,39 +273,113 @@ public final class NettyPipeChannel extends AbstractChannel {
 		}
 	}
 
+	/**
+	 * Hands flushed messages to the writer thread without removing them from Netty's
+	 * outbound buffer. A message is removed, and its promise completed, only by
+	 * {@link #onWritten(int)} once its bytes have been written to the pipe. Netty's own
+	 * pending-byte accounting therefore drives writability, and a close fails every
+	 * message the writer has not finished instead of having already succeeded it.
+	 *
+	 * <p>
+	 * Invariant: the writer owns exactly the first {@link #handedOff} flushed messages.
+	 * The writer queue holds at most {@code maxOutboundQueuedBytes}, except that a single
+	 * message larger than the cap is still handed off on its own so it cannot deadlock;
+	 * nothing is queued behind it until it has been written. Event-loop confined.
+	 * </p>
+	 */
 	@Override
-	protected void doWrite(ChannelOutboundBuffer in) throws Exception {
-		if (this.outputShutdownRequested.get() || this.outputShutdown.get()) {
-			throw new ClosedChannelException();
+	protected void doWrite(ChannelOutboundBuffer in) {
+		if (this.outputShutdown.get()) {
+			ClosedChannelException closed = new ClosedChannelException();
+			while (in.current() != null) {
+				in.remove(closed);
+			}
+			return;
 		}
-		for (;;) {
-			Object message = in.current();
-			if (message == null) {
-				return;
+		while (this.handedOff == 0) {
+			Object head = in.current();
+			if (head == null) {
+				break;
 			}
-			if (!(message instanceof ByteBuf buffer)) {
+			if (head instanceof ByteBuf buffer && buffer.isReadable()) {
+				break;
+			}
+			if (head instanceof ByteBuf) {
+				in.remove();
+			}
+			else {
 				in.remove(new UnsupportedOperationException("NettyPipeChannel accepts ByteBuf messages only"));
-				continue;
 			}
-			int readable = buffer.readableBytes();
-			if (readable == 0) {
-				in.remove();
-				continue;
-			}
-			synchronized (this.writeMonitor) {
-				long queued = this.outboundQueuedBytes.get();
-				if (queued + readable > this.config.getMaxOutboundQueuedBytes()) {
-					in.setUserDefinedWritability(1, false);
-					return;
+			onHeadRemoved();
+		}
+		int[] index = { 0 };
+		try {
+			in.forEachFlushedMessage(message -> {
+				int position = index[0]++;
+				if (position < this.handedOff) {
+					return true;
 				}
-				ByteBuf queuedBuffer = buffer.readRetainedSlice(readable);
-				this.outboundQueue.add(queuedBuffer);
-				long nowQueued = this.outboundQueuedBytes.addAndGet(readable);
-				updatePeak(this.peakOutboundQueuedBytes, nowQueued);
-				in.progress(readable);
-				in.remove();
-				this.writeMonitor.notifyAll();
-			}
+				if (this.shutdownPending && position >= this.drainRemaining) {
+					return false;
+				}
+				if (!(message instanceof ByteBuf buffer)) {
+					return false;
+				}
+				int readable = buffer.readableBytes();
+				if (this.handedOff > 0
+						&& this.outboundQueuedBytes.get() + readable > this.config.getMaxOutboundQueuedBytes()) {
+					return false;
+				}
+				ByteBuf owned = buffer.retainedDuplicate();
+				synchronized (this.writeMonitor) {
+					this.outboundQueue.add(owned);
+					updatePeak(this.peakOutboundQueuedBytes, this.outboundQueuedBytes.addAndGet(readable));
+					this.writeMonitor.notifyAll();
+				}
+				this.handedOff++;
+				return true;
+			});
+		}
+		catch (Exception unexpected) {
+			throw new IllegalStateException(unexpected);
+		}
+		maybeSignalOutputShutdown();
+	}
+
+	/**
+	 * Completes the head message after the writer has written its bytes. Event loop only.
+	 */
+	private void onWritten(int size) {
+		ChannelOutboundBuffer in = unsafe().outboundBuffer();
+		if (in == null || this.handedOff == 0) {
+			// Closed: Netty has already failed every message the writer still held.
+			return;
+		}
+		this.handedOff--;
+		in.progress(size);
+		in.remove();
+		onHeadRemoved();
+		resumeFlush();
+		maybeSignalOutputShutdown();
+	}
+
+	private void onHeadRemoved() {
+		if (this.shutdownPending && this.drainRemaining > 0) {
+			this.drainRemaining--;
+		}
+	}
+
+	/**
+	 * Event loop only. Signals the writer once the pre-shutdown backlog is on the pipe.
+	 */
+	private void maybeSignalOutputShutdown() {
+		if (!this.shutdownPending || this.drainRemaining > 0 || this.handedOff > 0
+				|| this.outputShutdownRequested.get()) {
+			return;
+		}
+		synchronized (this.writeMonitor) {
+			this.outputShutdownRequested.set(true);
+			this.writeMonitor.notifyAll();
 		}
 	}
 
@@ -408,13 +528,15 @@ public final class NettyPipeChannel extends AbstractChannel {
 					ReferenceCountUtil.release(buffer);
 					this.outboundQueuedBytes.addAndGet(-size);
 				}
-				eventLoop().execute(() -> {
-					ChannelOutboundBuffer pending = unsafe().outboundBuffer();
-					if (pending != null) {
-						pending.setUserDefinedWritability(1, true);
-					}
-					unsafe().flush();
-				});
+				try {
+					eventLoop().execute(() -> onWritten(size));
+				}
+				catch (RuntimeException rejected) {
+					// Event loop shut down: the channel is being torn down and Netty
+					// fails
+					// whatever is still outstanding.
+					return;
+				}
 			}
 		}
 		catch (InterruptedException ex) {
@@ -446,8 +568,11 @@ public final class NettyPipeChannel extends AbstractChannel {
 	private void completeOutputShutdown() throws IOException {
 		assertNotOnEventLoop();
 		this.duplex.shutdownOutput();
-		this.outputShutdown.set(true);
 		eventLoop().execute(() -> {
+			this.outputShutdown.set(true);
+			this.shutdownPending = false;
+			// Fails anything flushed after shutdownOutput() was requested.
+			resumeFlush();
 			pipeline().fireUserEventTriggered(OutboundShutdownEvent.INSTANCE);
 			ChannelPromise promise = this.shutdownOutputPromise;
 			if (promise != null) {

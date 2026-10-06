@@ -117,6 +117,23 @@ public final class PipeHttp2Server {
 		return result;
 	}
 
+	/**
+	 * Half-closes the connection; see {@link PipeHttp2Client#drainOutput()}.
+	 * @return a future completed once the drained output has been closed
+	 */
+	public CompletableFuture<Void> drainOutput() {
+		CompletableFuture<Void> result = new CompletableFuture<>();
+		this.channel.shutdownOutput().addListener(future -> {
+			if (future.isSuccess()) {
+				result.complete(null);
+			}
+			else {
+				result.completeExceptionally(future.cause());
+			}
+		});
+		return result;
+	}
+
 	public NettyPipeChannel channel() {
 		return this.channel;
 	}
@@ -290,6 +307,45 @@ public final class PipeHttp2Server {
 
 		@Override
 		public void headers(String status, Http2Headers headers) {
+			execute(() -> writeHeaders(status, headers));
+		}
+
+		@Override
+		public void data(io.netty.buffer.ByteBuf data, boolean endStream) {
+			execute(() -> {
+				if (!this.headersSent.get()) {
+					writeHeaders("200", null);
+				}
+				if (endStream) {
+					this.ended.set(true);
+				}
+				this.context.writeAndFlush(new DefaultHttp2DataFrame(data, endStream));
+			});
+		}
+
+		@Override
+		public void end() {
+			if (!this.ended.compareAndSet(false, true)) {
+				return;
+			}
+			execute(() -> {
+				if (!this.headersSent.get()) {
+					this.context
+						.writeAndFlush(new DefaultHttp2HeadersFrame(new DefaultHttp2Headers().status("200"), true));
+				}
+				else {
+					this.context.writeAndFlush(new DefaultHttp2DataFrame(Unpooled.EMPTY_BUFFER, true));
+				}
+			});
+		}
+
+		@Override
+		public void reset(long errorCode) {
+			this.ended.set(true);
+			execute(() -> this.context.writeAndFlush(new DefaultHttp2ResetFrame(errorCode)));
+		}
+
+		private void writeHeaders(String status, Http2Headers headers) {
 			Http2Headers response = new DefaultHttp2Headers().status(status);
 			if (headers != null) {
 				response.add(headers);
@@ -298,34 +354,13 @@ public final class PipeHttp2Server {
 			this.context.writeAndFlush(new DefaultHttp2HeadersFrame(response, false));
 		}
 
-		@Override
-		public void data(io.netty.buffer.ByteBuf data, boolean endStream) {
-			if (!this.headersSent.get()) {
-				headers("200", null);
-			}
-			if (endStream) {
-				this.ended.set(true);
-			}
-			this.context.writeAndFlush(new DefaultHttp2DataFrame(data, endStream));
-		}
-
-		@Override
-		public void end() {
-			if (!this.ended.compareAndSet(false, true)) {
-				return;
-			}
-			if (!this.headersSent.get()) {
-				this.context.writeAndFlush(new DefaultHttp2HeadersFrame(new DefaultHttp2Headers().status("200"), true));
+		private void execute(Runnable task) {
+			if (this.context.executor().inEventLoop()) {
+				task.run();
 			}
 			else {
-				this.context.writeAndFlush(new DefaultHttp2DataFrame(Unpooled.EMPTY_BUFFER, true));
+				this.context.executor().execute(task);
 			}
-		}
-
-		@Override
-		public void reset(long errorCode) {
-			this.ended.set(true);
-			this.context.writeAndFlush(new DefaultHttp2ResetFrame(errorCode));
 		}
 
 		@Override

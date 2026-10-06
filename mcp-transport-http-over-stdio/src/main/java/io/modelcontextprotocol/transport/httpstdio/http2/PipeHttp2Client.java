@@ -38,6 +38,12 @@ public final class PipeHttp2Client {
 
 	public static final long DEFAULT_MAX_RESPONSE_BODY_BYTES = 16L * 1024 * 1024;
 
+	/** Scheme used when a caller does not supply a logical URL. */
+	public static final String DEFAULT_SCHEME = "http";
+
+	/** Authority used when a caller does not supply a logical URL. */
+	public static final String DEFAULT_AUTHORITY = "pipe";
+
 	private final NettyPipeChannel channel;
 
 	private final long maxResponseBodyBytes;
@@ -150,16 +156,26 @@ public final class PipeHttp2Client {
 	 */
 	public StreamingResponse requestStreaming(String method, String path, Http2Headers extraHeaders, ByteBuf body,
 			StreamingResponse.Listener listener) {
+		return requestStreaming(method, DEFAULT_SCHEME, DEFAULT_AUTHORITY, path, extraHeaders, body, listener);
+	}
+
+	/**
+	 * Opens a response stream for a logical URL, carrying its scheme and authority as the
+	 * {@code :scheme} and {@code :authority} pseudo-headers.
+	 * @param listener listener that owns every delivered data buffer
+	 */
+	public StreamingResponse requestStreaming(String method, String scheme, String authority, String path,
+			Http2Headers extraHeaders, ByteBuf body, StreamingResponse.Listener listener) {
 		StreamingResponse response = new StreamingResponse(listener);
-		openStream(response, method, path, extraHeaders, body).exceptionally(failure -> {
+		openStream(response, method, scheme, authority, path, extraHeaders, body).exceptionally(failure -> {
 			response.failed(unwrap(failure));
 			return null;
 		});
 		return response;
 	}
 
-	private CompletableFuture<Void> openStream(StreamingResponse response, String method, String path,
-			Http2Headers extraHeaders, ByteBuf body) {
+	private CompletableFuture<Void> openStream(StreamingResponse response, String method, String scheme,
+			String authority, String path, Http2Headers extraHeaders, ByteBuf body) {
 		CompletableFuture<Void> opened = new CompletableFuture<>();
 		if (this.goAwaySent.get()) {
 			opened.completeExceptionally(new IllegalStateException("Cannot open a stream after GOAWAY"));
@@ -247,7 +263,10 @@ public final class PipeHttp2Client {
 				return;
 			}
 			Http2StreamChannel stream = (Http2StreamChannel) future.getNow();
-			Http2Headers headers = new DefaultHttp2Headers().method(method).path(path).scheme("http").authority("pipe");
+			Http2Headers headers = new DefaultHttp2Headers().method(method)
+				.path(path)
+				.scheme(scheme)
+				.authority(authority);
 			if (extraHeaders != null) {
 				headers.add(extraHeaders);
 			}
@@ -276,6 +295,19 @@ public final class PipeHttp2Client {
 	public CompletableFuture<Void> close() {
 		CompletableFuture<Void> result = new CompletableFuture<>();
 		this.channel.close().addListener(future -> complete(future.isSuccess(), future.cause(), result));
+		return result;
+	}
+
+	/**
+	 * Half-closes the connection: every outbound message flushed before this call is
+	 * written to the pipe, then the write direction is closed so the peer reads EOF.
+	 * Inbound reading continues until the peer closes its side or {@link #close()} is
+	 * called.
+	 * @return a future completed once the drained output has been closed
+	 */
+	public CompletableFuture<Void> drainOutput() {
+		CompletableFuture<Void> result = new CompletableFuture<>();
+		this.channel.shutdownOutput().addListener(future -> complete(future.isSuccess(), future.cause(), result));
 		return result;
 	}
 
