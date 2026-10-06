@@ -17,15 +17,13 @@ import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Optional;
-import java.util.concurrent.CancellationException;
-import java.util.concurrent.CompletableFuture;
-import java.util.concurrent.CompletionException;
 import java.util.concurrent.Flow;
 import java.util.concurrent.Flow.Publisher;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import io.modelcontextprotocol.client.transport.http.JdkHttpClientSend;
 import io.modelcontextprotocol.spec.McpTransportException;
 import io.modelcontextprotocol.util.Utils;
 import reactor.adapter.JdkFlowAdapter;
@@ -198,42 +196,7 @@ class ResponseBodyHandlers {
 	}
 
 	static Mono<HttpResponse<Publisher<List<ByteBuffer>>>> sendAsync(HttpClient httpClient, HttpRequest request) {
-		// Not Mono.fromFuture: cancelling aborts the exchange, and the HttpClient then
-		// fails the future with a CompletionException wrapping a CancellationException,
-		// which fromFuture reports as a dropped error. Only this method cna cancel the
-		// future, so that failure is ignored here. Replace with a plain fromFuture,
-		// keeping
-		// the doOnDiscard, once https://github.com/reactor/reactor-core/issues/4415 is
-		// resolved.
-		return Mono.<HttpResponse<Publisher<List<ByteBuffer>>>>create(sink -> {
-			CompletableFuture<HttpResponse<Publisher<List<ByteBuffer>>>> exchange = httpClient.sendAsync(request,
-					HttpResponse.BodyHandlers.ofPublisher());
-			sink.onCancel(() -> exchange.cancel(true));
-			exchange.whenComplete((response, error) -> {
-				if (error == null) {
-					// Emit the response so the body can be consumed.
-					// If the surrounding Mono was cancelled though and due to a race
-					// the headers were already parsed, the below call will simply
-					// discard the response.
-					sink.success(response);
-					return;
-				}
-				Throwable cause = error instanceof CompletionException && error.getCause() != null ? error.getCause()
-						: error;
-				if (cause instanceof CancellationException) {
-					sink.success();
-				}
-				else {
-					sink.error(cause);
-				}
-			});
-		})
-			// A body that is never subscribed to never releases its connection.
-			.doOnDiscard(HttpResponse.class, response -> {
-				if (response.body() instanceof Publisher<?> body) {
-					cancelBody(body);
-				}
-			});
+		return JdkHttpClientSend.sendAsync(httpClient, request);
 	}
 
 	private static void cancelBody(Publisher<?> body) {

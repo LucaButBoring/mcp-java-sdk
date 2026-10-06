@@ -18,7 +18,7 @@ import com.sun.net.httpserver.HttpExchange;
 import com.sun.net.httpserver.HttpHandler;
 import com.sun.net.httpserver.HttpServer;
 
-final class LoopbackMcpHttpServer implements AutoCloseable {
+public final class LoopbackMcpHttpServer implements AutoCloseable {
 
 	private static final byte[] EMPTY_BODY = new byte[0];
 
@@ -43,7 +43,7 @@ final class LoopbackMcpHttpServer implements AutoCloseable {
 		this.executor = executor;
 	}
 
-	static LoopbackMcpHttpServer start() throws IOException {
+	public static LoopbackMcpHttpServer start() throws IOException {
 		HttpServer server = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
 		ExecutorService executor = Executors.newCachedThreadPool(new LoopbackThreadFactory());
 		server.setExecutor(executor);
@@ -54,8 +54,12 @@ final class LoopbackMcpHttpServer implements AutoCloseable {
 		return new LoopbackMcpHttpServer(server, executor);
 	}
 
-	URI baseUri() {
+	public URI baseUri() {
 		return URI.create("http://127.0.0.1:" + this.server.getAddress().getPort());
+	}
+
+	public void createContext(String path, HttpHandler handler) {
+		this.server.createContext(path, handler);
 	}
 
 	@Override
