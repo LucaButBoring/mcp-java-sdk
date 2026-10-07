@@ -93,6 +93,8 @@ public final class HttpOverStdioServerTransport implements McpStatelessServerTra
 
 	private final Duration keepAliveInterval;
 
+	private final McpEndpointAuthorizer authorizer;
+
 	private final AtomicBoolean closing = new AtomicBoolean();
 
 	private final PipeHttp2Server server;
@@ -114,6 +116,7 @@ public final class HttpOverStdioServerTransport implements McpStatelessServerTra
 		this.binding = builder.binding;
 		this.applicationRoute = builder.applicationRoute;
 		this.keepAliveInterval = builder.keepAliveInterval;
+		this.authorizer = builder.authorizer;
 		this.server = PipeHttp2Server.start(duplex, this.eventLoopGroup, builder.config, this.requestMaxSize,
 				this::handle);
 	}
@@ -233,6 +236,17 @@ public final class HttpOverStdioServerTransport implements McpStatelessServerTra
 			}
 			return;
 		}
+		McpTransportContext extracted = this.contextExtractor.extract(request);
+		McpTransportContext context = extracted == null ? McpTransportContext.EMPTY : extracted;
+		// Authorization does not depend on whether a handler is installed yet, so a
+		// protected endpoint challenges before it reports 503.
+		if (this.authorizer != null) {
+			Optional<StatelessHttpResponse> denied = this.authorizer.authorize(request, context);
+			if (denied.isPresent()) {
+				writeResponse(writer, denied.get(), this.keepAliveInterval);
+				return;
+			}
+		}
 		StatelessHttpDispatcher current = this.dispatcher;
 		if (current == null) {
 			writeEmpty(writer, 503, Map.of());
@@ -245,9 +259,8 @@ public final class HttpOverStdioServerTransport implements McpStatelessServerTra
 			.stream()
 			.findFirst()
 			.flatMap(HttpOverStdioServerTransport::parseContentLength);
-		McpTransportContext context = this.contextExtractor.extract(request);
 		StatelessHttpRequest statelessRequest = new StatelessHttpRequest(request.method(), request.path(), headers,
-				contentLength, body, context == null ? McpTransportContext.EMPTY : context);
+				contentLength, body, context);
 		Duration keepAlive = this.keepAliveInterval;
 		current.dispatch(statelessRequest)
 			.subscribe(response -> writeResponse(writer, response, keepAlive), failure -> {
@@ -393,6 +406,18 @@ public final class HttpOverStdioServerTransport implements McpStatelessServerTra
 		private Http2RequestHandler applicationRoute;
 
 		private Duration keepAliveInterval = DEFAULT_KEEP_ALIVE_INTERVAL;
+
+		private McpEndpointAuthorizer authorizer;
+
+		/**
+		 * Lets the child act as an OAuth protected resource: the authorizer may answer an
+		 * MCP endpoint request with 401 and a {@code WWW-Authenticate} challenge before
+		 * it is dispatched. Application routes are not affected.
+		 */
+		public Builder authorizer(McpEndpointAuthorizer authorizer) {
+			this.authorizer = authorizer;
+			return this;
+		}
 
 		private Builder(DuplexByteChannel duplex) {
 			this.duplex = Objects.requireNonNull(duplex, "duplex");
