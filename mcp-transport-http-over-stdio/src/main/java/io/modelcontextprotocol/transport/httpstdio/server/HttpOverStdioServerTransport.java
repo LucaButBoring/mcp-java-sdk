@@ -18,6 +18,7 @@ import io.modelcontextprotocol.server.transport.DefaultServerTransportSecurityVa
 import io.modelcontextprotocol.server.transport.ServerHttpHeaderValidator;
 import io.modelcontextprotocol.server.transport.ServerTransportSecurityException;
 import io.modelcontextprotocol.server.transport.http.McpHttpBinding2026;
+import io.modelcontextprotocol.server.transport.http.McpStatelessStreamingServerHandler;
 import io.modelcontextprotocol.server.transport.http.SseEvent;
 import io.modelcontextprotocol.server.transport.http.StatelessHttpDispatcher;
 import io.modelcontextprotocol.server.transport.http.StatelessHttpRequest;
@@ -183,9 +184,20 @@ public final class HttpOverStdioServerTransport implements McpStatelessServerTra
 	@Override
 	public void setMcpHandler(McpStatelessServerHandler mcpHandler) {
 		Assert.notNull(mcpHandler, "mcpHandler must not be null");
+		setStreamingHandler(StatelessServerHandlerAdapter.adapt(mcpHandler));
+	}
+
+	/**
+	 * Installs a handler that may answer requests with request-scoped or long-lived
+	 * ({@code subscriptions/listen}) SSE streams. {@link #setMcpHandler} installs a
+	 * legacy single-response handler through the same path.
+	 * @param handler the streaming handler
+	 */
+	public void setStreamingHandler(McpStatelessStreamingServerHandler handler) {
+		Assert.notNull(handler, "handler must not be null");
 		// The transport has already run the security validator for this request.
-		this.dispatcher = new StatelessHttpDispatcher(this.jsonMapper, StatelessServerHandlerAdapter.adapt(mcpHandler),
-				this.requestMaxSize, this.closing::get, ServerHttpHeaderValidator.NOOP, this.binding);
+		this.dispatcher = new StatelessHttpDispatcher(this.jsonMapper, handler, this.requestMaxSize, this.closing::get,
+				ServerHttpHeaderValidator.NOOP, this.binding);
 	}
 
 	@Override

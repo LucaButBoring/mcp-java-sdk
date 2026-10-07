@@ -18,6 +18,7 @@ import io.netty.channel.ChannelFuture;
 import io.netty.channel.ChannelHandlerContext;
 import io.netty.channel.ChannelInboundHandlerAdapter;
 import io.netty.channel.DefaultEventLoopGroup;
+import io.netty.util.ReferenceCountUtil;
 import io.netty.util.concurrent.DefaultThreadFactory;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.RepeatedTest;
@@ -449,6 +450,43 @@ class NettyPipeChannelTests {
 		assertThat(oversized.isSuccess()).isTrue();
 		assertThat(next.isSuccess()).isTrue();
 		assertThat(duplex.written()).hasSize(17 * 1024);
+	}
+
+	/**
+	 * Closing one end must look like end-of-stream to the peer. With piped streams the
+	 * peer otherwise sees "Write end dead" if the writer thread exits before the pipe is
+	 * closed.
+	 */
+	@RepeatedTest(100)
+	void closingOneEndDeliversEofNotAnErrorToThePeer() throws Exception {
+		ChannelPair pair = newPair();
+		pair.b.config().setCloseOnInboundEof(false);
+		CountDownLatch eof = new CountDownLatch(1);
+		CopyOnWriteArrayList<Throwable> errors = new CopyOnWriteArrayList<>();
+		pair.b.pipeline().addLast(new ChannelInboundHandlerAdapter() {
+			@Override
+			public void channelRead(ChannelHandlerContext context, Object message) {
+				ReferenceCountUtil.release(message);
+			}
+
+			@Override
+			public void userEventTriggered(ChannelHandlerContext context, Object event) {
+				if (event == InboundEofEvent.INSTANCE) {
+					eof.countDown();
+				}
+			}
+
+			@Override
+			public void exceptionCaught(ChannelHandlerContext context, Throwable cause) {
+				errors.add(cause);
+			}
+		});
+		ChannelFuture last = pair.a.writeAndFlush(Unpooled.wrappedBuffer(new byte[] { 1 }));
+		last.addListener(future -> pair.a.close());
+		last.sync();
+
+		assertThat(eof.await(5, TimeUnit.SECONDS)).isTrue();
+		assertThat(errors).isEmpty();
 	}
 
 	private NettyPipeChannel register(DuplexByteChannel duplex) throws Exception {

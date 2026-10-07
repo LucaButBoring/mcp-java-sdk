@@ -146,6 +146,41 @@ class ChildProcessMcpOverStdioTests {
 		assertThat(stderr).noneMatch(line -> line.contains("PRI * HTTP/2.0"));
 	}
 
+	@Test
+	void childExitMidRequestFailsTheExchangeInsteadOfHanging() throws Exception {
+		CopyOnWriteArrayList<String> stderr = new CopyOnWriteArrayList<>();
+		HttpOverStdioClientTransport client = HttpOverStdioClientTransport.launch(command(), Map.of(), stderr::add)
+			.get(30, java.util.concurrent.TimeUnit.SECONDS);
+		try {
+			await(() -> stderr.contains("ready"));
+			McpHttpRequest crash = McpHttpRequest.builder()
+				.method("POST")
+				.uri(URI.create(LOGICAL_URL + "/mcp"))
+				.headers(McpHttpHeaders.builder()
+					.add("Accept", "application/json, text/event-stream")
+					.add("MCP-Protocol-Version", "2026-07-28")
+					.add("Mcp-Method", "test/crash")
+					.build())
+				.body("{\"jsonrpc\":\"2.0\",\"id\":\"9\",\"method\":\"test/crash\",\"params\":{\"_meta\":"
+						+ "{\"io.modelcontextprotocol/protocolVersion\":\"2026-07-28\"}}}")
+				.build();
+			long started = System.nanoTime();
+			assertThatThrownBy(
+					() -> client.exchange().exchange(crash, McpTransportContext.EMPTY).block(Duration.ofSeconds(20)))
+				.as("the peer-close failure, not the 20 s blocking timeout")
+				.isInstanceOf(io.modelcontextprotocol.transport.httpstdio.http2.Http2TransportException.class)
+				.hasMessageContaining("closed before end-of-stream");
+			assertThat(Duration.ofNanos(System.nanoTime() - started)).isLessThan(Duration.ofSeconds(10));
+			Process child = client.childProcess().orElseThrow();
+			assertThat(child.waitFor(10, java.util.concurrent.TimeUnit.SECONDS)).isTrue();
+			assertThat(child.exitValue()).isEqualTo(3);
+			assertThat(stderr).contains("crashing");
+		}
+		finally {
+			client.closeGracefully().block(Duration.ofSeconds(15));
+		}
+	}
+
 	private static McpHttpRequest withHeader(McpHttpRequest request, String name, String value) {
 		McpHttpRequest.Builder builder = McpHttpRequest.builder()
 			.method(request.method())

@@ -547,6 +547,24 @@ public final class NettyPipeChannel extends AbstractChannel {
 				fireExceptionAndClose(ex);
 			}
 		}
+		finally {
+			closeOutputOnWriterExit();
+		}
+	}
+
+	/**
+	 * The writer thread owns the outbound stream, so it closes it before exiting. Closing
+	 * it later from the closer thread leaves a window in which a peer reading a piped
+	 * stream sees the writing thread dead with the pipe still open, and reports "Write
+	 * end dead" instead of end-of-stream.
+	 */
+	private void closeOutputOnWriterExit() {
+		try {
+			this.duplex.shutdownOutput();
+		}
+		catch (IOException ignored) {
+			// Already closed or broken; the closer closes the rest.
+		}
 	}
 
 	private ByteBuf awaitOutboundBuffer() throws InterruptedException {

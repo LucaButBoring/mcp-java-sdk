@@ -67,6 +67,11 @@ public final class StatelessEchoServerMain {
 		@Override
 		public Mono<McpSchema.JSONRPCResponse> handleRequest(McpTransportContext context,
 				McpSchema.JSONRPCRequest request) {
+			if ("test/crash".equals(request.method())) {
+				// Simulates the child dying mid-request: no response, no GOAWAY.
+				System.err.println("crashing");
+				Runtime.getRuntime().halt(3);
+			}
 			return Mono.just(McpSchema.JSONRPCResponse.result(request.id(),
 					Map.of("method", request.method(), "pid", ProcessHandle.current().pid())));
 		}
