@@ -68,8 +68,13 @@ class StatelessHttpBindingTests {
 		assertMismatch(dispatch(request("tools/list", Map.of(), "2025-11-25"), headers("tools/list", null)),
 				"MCP-Protocol-Version header value '2026-07-28' does not match body value '2025-11-25'");
 
-		assertMismatch(dispatch(new McpSchema.JSONRPCRequest(McpSchema.JSONRPC_VERSION, "tools/list", "1", Map.of()),
-				headers("tools/list", null)), "does not match body value 'null'");
+		McpSchema.JSONRPCResponse.JSONRPCError missingMeta = error(
+				dispatch(new McpSchema.JSONRPCRequest(McpSchema.JSONRPC_VERSION, "tools/list", "1", Map.of()),
+						headers("tools/list", null)),
+				400);
+		assertThat(missingMeta.code()).as("absent body field is an invalid request, not a header mismatch")
+			.isEqualTo(McpSchema.ErrorCodes.INVALID_PARAMS);
+		assertThat(this.handled).isEmpty();
 	}
 
 	@Test

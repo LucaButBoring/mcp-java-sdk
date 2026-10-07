@@ -66,6 +66,13 @@ final class StatelessHttpBindingValidator {
 			return mismatch(request, "MCP-Protocol-Version header is required");
 		}
 		Object bodyVersion = asMap(params.get("_meta")).get(PROTOCOL_VERSION_META_KEY);
+		if (!(bodyVersion instanceof String)) {
+			// A required body field is absent, so the request itself is invalid; there is
+			// no
+			// body value for the header to mismatch (SEP-2575: -32602, HTTP 400).
+			return reject(request, McpSchema.ErrorCodes.INVALID_PARAMS,
+					"Invalid params: _meta." + PROTOCOL_VERSION_META_KEY + " is required", null);
+		}
 		if (!version.get().equals(bodyVersion)) {
 			return mismatch(request, "MCP-Protocol-Version header value '" + version.get()
 					+ "' does not match body value '" + bodyVersion + "'");

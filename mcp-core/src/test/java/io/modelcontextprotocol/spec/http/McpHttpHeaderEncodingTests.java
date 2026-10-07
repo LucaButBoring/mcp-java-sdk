@@ -37,6 +37,8 @@ class McpHttpHeaderEncodingTests {
 	@Test
 	void decodingRejectsInvalidValues() {
 		assertThat(McpHeaderValueCodec.decode("=?base64?not base64!?=")).isEmpty();
+		assertThat(McpHeaderValueCodec.decode("=?base64?SGVsbG8?=")).as("unpadded base64").isEmpty();
+		assertThat(McpHeaderValueCodec.decode("=?base64?SGVsbG8=?=")).contains("Hello");
 		assertThat(McpHeaderValueCodec.decode("=?base64?/w==?=")).as("0xFF is not UTF-8").isEmpty();
 		assertThat(McpHeaderValueCodec.decode("caf\u00e9")).as("non-ASCII plain value").isEmpty();
 		assertThat(McpHeaderValueCodec.decode("a\u0001b")).as("control character").isEmpty();

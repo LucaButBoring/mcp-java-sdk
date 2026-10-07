@@ -56,6 +56,12 @@ public final class McpHeaderValueCodec {
 	public static Optional<String> decode(String header) {
 		if (isSentinel(header)) {
 			String payload = header.substring(SENTINEL_PREFIX.length(), header.length() - SENTINEL_SUFFIX.length());
+			// Canonical padded RFC 4648 base64 only: the JDK decoder would otherwise
+			// accept
+			// unpadded input, which the SEP-2243 test table requires servers to reject.
+			if (payload.length() % 4 != 0) {
+				return Optional.empty();
+			}
 			try {
 				byte[] bytes = Base64.getDecoder().decode(payload);
 				return Optional.of(StandardCharsets.UTF_8.newDecoder()
