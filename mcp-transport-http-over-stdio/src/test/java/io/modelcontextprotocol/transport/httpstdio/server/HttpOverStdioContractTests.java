@@ -21,11 +21,7 @@ import io.modelcontextprotocol.transport.httpstdio.client.PipeRequests;
 import io.modelcontextprotocol.common.McpTransportContext;
 import io.modelcontextprotocol.json.McpJsonDefaults;
 import io.modelcontextprotocol.json.McpJsonMapper;
-import io.modelcontextprotocol.server.McpServer;
-import io.modelcontextprotocol.server.McpStatelessServerFeatures;
-import io.modelcontextprotocol.server.McpStatelessSyncServer;
 import io.modelcontextprotocol.spec.McpSchema;
-import io.modelcontextprotocol.spec.ProtocolVersions;
 import io.modelcontextprotocol.transport.httpstdio.client.HttpOverStdioClientTransport;
 import io.modelcontextprotocol.transport.httpstdio.pipe.DuplexByteChannel;
 import io.modelcontextprotocol.transport.httpstdio.pipe.InMemoryDuplexByteChannel;
@@ -50,7 +46,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 @Timeout(60)
 class HttpOverStdioContractTests {
 
-	private static final String V = McpHttpBinding2026.PROTOCOL_VERSION;
+	private static final String V = "2026-07-28";
 
 	private static final McpJsonMapper JSON = McpJsonDefaults.getMapper();
 
@@ -306,123 +302,6 @@ class HttpOverStdioContractTests {
 		assertThat(statusOf(post(request("small", "tools/list", Map.of()), headers("tools/list")))).isEqualTo(200);
 	}
 
-	// ----------------------------------------- 2026 binding with the real SDK server
-
-	@Test
-	void realStatelessServerUnknownMethodAnswers404() throws Exception {
-		connect(builder -> {
-		});
-		McpStatelessSyncServer mcp = McpServer.sync(this.server)
-			.capabilities(McpSchema.ServerCapabilities.builder().tools(true).build())
-			.build();
-		try {
-			HttpResponse<Flow.Publisher<List<ByteBuffer>>> response = exchange(
-					post(request("1", "nope/nope", Map.of()), headers("nope/nope")))
-				.block(Duration.ofSeconds(5));
-			assertThat(response.statusCode()).isEqualTo(404);
-			assertThat(body(response).block(Duration.ofSeconds(5))).contains("\"code\":-32601");
-		}
-		finally {
-			mcp.closeGracefully();
-		}
-	}
-
-	@Test
-	void unsupportedProtocolVersionListsSupportedVersions() throws Exception {
-		connect(builder -> {
-		});
-		this.server.setStreamingHandler(exchange -> Mono.error(new AssertionError("handler must not run")));
-		Map<String, String> headers = new LinkedHashMap<>(headers("tools/list"));
-		headers.put("MCP-Protocol-Version", "2099-01-01");
-		HttpResponse<Flow.Publisher<List<ByteBuffer>>> response = exchange(
-				post(request("1", "tools/list", Map.of(), "2099-01-01"), headers))
-			.block(Duration.ofSeconds(5));
-		assertThat(response.statusCode()).isEqualTo(400);
-		assertThat(body(response).block(Duration.ofSeconds(5))).contains("\"code\":-32022")
-			.contains("\"supported\":[\"" + V + "\"]")
-			.contains("\"requested\":\"2099-01-01\"");
-	}
-
-	@Test
-	void realStatelessServerToolHeadersAreValidatedAgainstItsOwnDeclarations() throws Exception {
-		connect(builder -> {
-		});
-		McpSchema.Tool sql = McpSchema.Tool
-			.builder("execute_sql",
-					Map.of("type", "object", "properties", Map.of("region",
-							Map.of("type", "string", "x-mcp-header", "Region"), "query", Map.of("type", "string"))))
-			.build();
-		McpSchema.Tool invalid = McpSchema.Tool
-			.builder("bad_tool", Map.of("type", "object", "properties",
-					Map.of("ratio", Map.of("type", "number", "x-mcp-header", "Ratio"))))
-			.build();
-		McpStatelessSyncServer mcp = McpServer.sync(this.server)
-			.capabilities(McpSchema.ServerCapabilities.builder().tools(true).build())
-			.tools(toolSpec(sql), toolSpec(invalid))
-			.build();
-		try {
-			Map<String, Object> args = Map.of("region", "us-west1", "query", "SELECT 1");
-			Map<String, String> good = new LinkedHashMap<>(callHeaders("execute_sql"));
-			good.put("Mcp-Param-Region", "us-west1");
-			HttpResponse<Flow.Publisher<List<ByteBuffer>>> ok = exchange(post(call("1", "execute_sql", args), good))
-				.block(Duration.ofSeconds(5));
-			assertThat(ok.statusCode()).isEqualTo(200);
-			assertThat(body(ok).block(Duration.ofSeconds(5))).contains("called execute_sql");
-
-			assertThat(statusOf(post(call("2", "execute_sql", args), callHeaders("execute_sql"))))
-				.as("missing Mcp-Param-Region")
-				.isEqualTo(400);
-			Map<String, String> wrong = new LinkedHashMap<>(callHeaders("execute_sql"));
-			wrong.put("mcp-param-region", "us-east1");
-			HttpResponse<Flow.Publisher<List<ByteBuffer>>> mismatch = exchange(
-					post(call("3", "execute_sql", args), wrong))
-				.block(Duration.ofSeconds(5));
-			assertThat(mismatch.statusCode()).isEqualTo(400);
-			assertThat(body(mismatch).block(Duration.ofSeconds(5))).contains("\"code\":-32020")
-				.contains("Mcp-Param-Region");
-
-			assertThat(statusOf(post(call("4", "bad_tool", Map.of("ratio", 0.5)), callHeaders("bad_tool"))))
-				.as("SDK choice, not a spec rule: the spec makes clients exclude invalid tool definitions; "
-						+ "this server leaves their parameters unvalidated and lets the handler answer")
-				.isEqualTo(200);
-		}
-		finally {
-			mcp.closeGracefully();
-		}
-	}
-
-	@Test
-	void sentinelEncodedNamesRoundTrip() throws Exception {
-		connect(builder -> {
-		});
-		// Resource URIs, unlike SDK tool names, may hold spaces and non-ASCII text, which
-		// Mcp-Name must carry in the base64 sentinel form.
-		String uri = "file:///docs/Grüße und 世界.txt";
-		McpStatelessSyncServer mcp = McpServer.sync(this.server)
-			.capabilities(McpSchema.ServerCapabilities.builder().resources(false, false).build())
-			.resources(new McpStatelessServerFeatures.SyncResourceSpecification(
-					McpSchema.Resource.builder(uri, "greeting").build(),
-					(context, request) -> new McpSchema.ReadResourceResult(
-							List.of(new McpSchema.TextResourceContents(request.uri(), "text/plain", "read " + uri)))))
-			.build();
-		try {
-			Map<String, String> headers = new LinkedHashMap<>(headers("resources/read"));
-			headers.put("Mcp-Name", McpHeaderValueCodec.encode(uri));
-			assertThat(headers.get("Mcp-Name")).startsWith("=?base64?");
-			HttpResponse<Flow.Publisher<List<ByteBuffer>>> response = exchange(
-					post(request("1", "resources/read", Map.of("uri", uri)), headers))
-				.block(Duration.ofSeconds(5));
-			assertThat(response.statusCode()).isEqualTo(200);
-			assertThat(body(response).block(Duration.ofSeconds(5))).contains("read " + uri);
-
-			headers.put("Mcp-Name", McpHeaderValueCodec.encode("file:///docs/other.txt"));
-			assertThat(statusOf(post(request("2", "resources/read", Map.of("uri", uri)), headers))).isEqualTo(400);
-		}
-		finally {
-			mcp.closeGracefully();
-		}
-	}
-
 	// ------------------------------------------------------------------ framing
 
 	@Test
@@ -450,15 +329,6 @@ class HttpOverStdioContractTests {
 		customizer.accept(builder);
 		this.server = builder.build();
 		this.client = HttpOverStdioClientTransport.connect(pair[0]).get(10, TimeUnit.SECONDS);
-	}
-
-	private static McpStatelessServerFeatures.SyncToolSpecification toolSpec(McpSchema.Tool tool) {
-		return McpStatelessServerFeatures.SyncToolSpecification.builder()
-			.tool(tool)
-			.callHandler((context, request) -> McpSchema.CallToolResult.builder()
-				.content(List.of(McpSchema.TextContent.builder("called " + request.name()).build()))
-				.build())
-			.build();
 	}
 
 	private Mono<HttpResponse<Flow.Publisher<List<ByteBuffer>>>> exchange(HttpRequest request) {
@@ -503,10 +373,6 @@ class HttpOverStdioContractTests {
 				Map.of("progressToken", token, "progress", value));
 	}
 
-	private static String call(String id, String tool, Map<String, Object> arguments) {
-		return request(id, "tools/call", Map.of("name", tool, "arguments", arguments));
-	}
-
 	private static String request(String id, String method, Map<String, Object> params) {
 		return request(id, method, params, V);
 	}
@@ -534,7 +400,7 @@ class HttpOverStdioContractTests {
 
 	private static Map<String, String> callHeaders(String tool) {
 		Map<String, String> headers = headers("tools/call");
-		headers.put("Mcp-Name", McpHeaderValueCodec.encode(tool));
+		headers.put("Mcp-Name", tool);
 		return headers;
 	}
 

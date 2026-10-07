@@ -26,11 +26,8 @@ import org.junit.jupiter.params.provider.Arguments;
  * {@link HttpOverStdioClientTransport} and {@link HttpOverStdioServerTransport}.
  *
  * <p>
- * The suite exercises the pre-2026 lifecycle ({@code initialize}, no request-metadata
- * headers), which is what SDK core speaks today, so the 2026-07-28 binding is disabled.
- * The suite therefore proves the pipe carries the existing SDK end to end. The 2026
- * binding is covered by {@link HttpOverStdioServerTransportTests} and the HTTP binding
- * contract tests.
+ * The suite exercises the lifecycle SDK core speaks today ({@code initialize}, no
+ * request-metadata headers), so it proves the pipe carries the existing SDK end to end.
  */
 @Timeout(30)
 class HttpOverStdioStatelessSharedIntegrationTests extends AbstractStatelessIntegrationTests {
@@ -50,7 +47,6 @@ class HttpOverStdioStatelessSharedIntegrationTests extends AbstractStatelessInte
 		DuplexByteChannel[] pair = InMemoryDuplexByteChannel.pair(64 * 1024);
 		this.serverTransport = HttpOverStdioServerTransport.builder(pair[1])
 			.endpoint(ENDPOINT)
-			.binding(null)
 			.contextExtractor(request -> McpTransportContext.create(Map.of("important", "value")))
 			.build();
 		this.clientTransport = HttpOverStdioClientTransport.connect(pair[0]).get(10, TimeUnit.SECONDS);

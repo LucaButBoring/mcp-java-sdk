@@ -40,7 +40,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 
 class HttpOverStdioServerTransportTests {
 
-	private static final String V = McpHttpBinding2026.PROTOCOL_VERSION;
+	private static final String V = "2026-07-28";
 
 	private static final String LIST_BODY = "{\"jsonrpc\":\"2.0\",\"id\":\"1\",\"method\":\"tools/list\","
 			+ "\"params\":{\"_meta\":{\"io.modelcontextprotocol/protocolVersion\":\"" + V + "\"}}}";
@@ -84,7 +84,7 @@ class HttpOverStdioServerTransportTests {
 	}
 
 	@Test
-	void legacyHandlerRoundTripsAJsonRpcRequestWith2026Headers() throws Exception {
+	void legacyHandlerRoundTripsAJsonRpcRequest() throws Exception {
 		connect(builder -> {
 		});
 		this.server.setMcpHandler(okHandler(new AtomicReference<>()));
@@ -92,7 +92,6 @@ class HttpOverStdioServerTransportTests {
 				post("/mcp", LIST_BODY, mcpHeaders("tools/list")));
 		assertThat(response.statusCode()).isEqualTo(200);
 		assertThat(read(response)).contains("\"id\":\"1\"").contains("\"result\":\"ok\"");
-		assertThat(this.server.protocolVersions()).containsExactly(V);
 	}
 
 	@Test
@@ -100,17 +99,6 @@ class HttpOverStdioServerTransportTests {
 		connect(builder -> {
 		});
 		assertThat(send(post("/mcp", LIST_BODY, mcpHeaders("tools/list"))).statusCode()).isEqualTo(503);
-	}
-
-	@Test
-	void headerMismatchAnswers400WithMinus32020() throws Exception {
-		connect(builder -> {
-		});
-		this.server.setMcpHandler(okHandler(new AtomicReference<>()));
-		HttpResponse<Flow.Publisher<List<ByteBuffer>>> response = send(
-				post("/mcp", LIST_BODY, mcpHeaders("tools/call")));
-		assertThat(response.statusCode()).isEqualTo(400);
-		assertThat(read(response)).contains("\"code\":-32020").contains("Mcp-Method");
 	}
 
 	@Test

@@ -18,7 +18,6 @@ import io.modelcontextprotocol.server.transport.DefaultServerTransportSecurityVa
 import io.modelcontextprotocol.server.transport.ServerHttpHeaderValidator;
 import io.modelcontextprotocol.server.transport.ServerTransportSecurityException;
 import io.modelcontextprotocol.spec.McpStatelessServerTransport;
-import io.modelcontextprotocol.spec.ProtocolVersions;
 import io.modelcontextprotocol.transport.httpstdio.http2.Http2Request;
 import io.modelcontextprotocol.transport.httpstdio.http2.Http2RequestHandler;
 import io.modelcontextprotocol.transport.httpstdio.http2.Http2ResponseWriter;
@@ -46,11 +45,10 @@ import reactor.core.publisher.Mono;
  * <p>
  * Requests whose path is the MCP endpoint are dispatched by
  * {@link StatelessHttpDispatcher}: POST only (GET, DELETE, and other methods answer 405),
- * Origin and optional logical-authority validation, the 2026-07-28 request-metadata
- * binding ({@link McpHttpBinding2026}), and JSON, SSE, or 202 responses. Every other path
- * goes to the configured application route, or answers 404. Long-lived SSE responses
- * ({@code subscriptions/listen}) emit an SSE comment line whenever they have been idle
- * for the keep-alive interval.
+ * Origin and optional logical-authority validation, and JSON, SSE, or 202 responses.
+ * Every other path goes to the configured application route, or answers 404. Long-lived
+ * SSE responses ({@code subscriptions/listen}) emit an SSE comment line whenever they
+ * have been idle for the keep-alive interval.
  */
 public final class HttpOverStdioServerTransport implements McpStatelessServerTransport {
 
@@ -80,8 +78,6 @@ public final class HttpOverStdioServerTransport implements McpStatelessServerTra
 
 	private final McpTransportContextExtractor<Http2Request> contextExtractor;
 
-	private final McpHttpBinding2026 binding;
-
 	private final Http2RequestHandler applicationRoute;
 
 	private final Duration keepAliveInterval;
@@ -106,7 +102,6 @@ public final class HttpOverStdioServerTransport implements McpStatelessServerTra
 		this.securityValidator = builder.securityValidator != null ? builder.securityValidator
 				: DefaultServerTransportSecurityValidator.builder().allowedHosts(builder.allowedAuthorities).build();
 		this.contextExtractor = builder.contextExtractor;
-		this.binding = builder.binding;
 		this.applicationRoute = builder.applicationRoute;
 		this.keepAliveInterval = builder.keepAliveInterval;
 		this.authorizer = builder.authorizer;
@@ -193,13 +188,7 @@ public final class HttpOverStdioServerTransport implements McpStatelessServerTra
 		Assert.notNull(handler, "handler must not be null");
 		// The transport has already run the security validator for this request.
 		this.dispatcher = new StatelessHttpDispatcher(this.jsonMapper, handler, this.requestMaxSize, this.closing::get,
-				ServerHttpHeaderValidator.NOOP, this.binding);
-	}
-
-	@Override
-	public List<String> protocolVersions() {
-		return this.binding != null ? this.binding.supportedVersions()
-				: McpStatelessServerTransport.super.protocolVersions();
+				ServerHttpHeaderValidator.NOOP);
 	}
 
 	public PipeHttp2Server server() {
@@ -392,10 +381,6 @@ public final class HttpOverStdioServerTransport implements McpStatelessServerTra
 
 		private McpTransportContextExtractor<Http2Request> contextExtractor = request -> McpTransportContext.EMPTY;
 
-		private McpHttpBinding2026 binding = McpHttpBinding2026.builder()
-			.supportedVersions(List.of(McpHttpBinding2026.PROTOCOL_VERSION))
-			.build();
-
 		private Http2RequestHandler applicationRoute;
 
 		private Duration keepAliveInterval = DEFAULT_KEEP_ALIVE_INTERVAL;
@@ -466,16 +451,6 @@ public final class HttpOverStdioServerTransport implements McpStatelessServerTra
 		/** Extracts the per-request transport context handed to MCP handlers. */
 		public Builder contextExtractor(McpTransportContextExtractor<Http2Request> contextExtractor) {
 			this.contextExtractor = Objects.requireNonNull(contextExtractor, "contextExtractor");
-			return this;
-		}
-
-		/**
-		 * The 2026-07-28 request-metadata binding; defaults to 2026-07-28 only. Passing
-		 * {@code null} disables it and accepts requests without 2026 headers, which is
-		 * not 2026-07-28 Streamable HTTP conformant.
-		 */
-		public Builder binding(McpHttpBinding2026 binding) {
-			this.binding = binding;
 			return this;
 		}
 

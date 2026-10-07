@@ -62,10 +62,10 @@ class StdioBridgeTests {
 	@Test
 	void headersNamedByConnectionAreNotForwarded() throws Exception {
 		String response = raw("POST", "localhost:" + bridge.port(), LIST, "tools/list",
-				"Connection: close, Mcp-Method\r\n");
-		assertThat(response).startsWith("HTTP/1.1 400")
-			.contains("\"code\":-32020")
-			.contains("Mcp-Method header is required");
+				"Connection: close, Accept\r\n");
+		assertThat(response).as("the child never sees Accept, so it rejects the request")
+			.startsWith("HTTP/1.1 400")
+			.contains("Accept header");
 	}
 
 	@Test
@@ -159,15 +159,11 @@ class StdioBridgeTests {
 		assertThat(response.statusCode()).isEqualTo(200);
 		assertThat(response.headers().firstValue("content-type"))
 			.hasValueSatisfying(type -> assertThat(type).startsWith("application/json"));
-		assertThat(response.body()).contains("\"test_headers\"").contains("\"x-mcp-header\":\"Region\"");
+		assertThat(response.body()).contains("\"test_simple_text\"");
 	}
 
 	@Test
 	void childValidationResultsReachTheRunnerUnchanged() throws Exception {
-		HttpResponse<String> mismatch = send(post(LIST, "prompts/list").build());
-		assertThat(mismatch.statusCode()).isEqualTo(400);
-		assertThat(mismatch.body()).contains("\"code\":-32020");
-
 		HttpResponse<String> hostileOrigin = send(
 				post(LIST, "tools/list").header("Origin", "http://evil.example").build());
 		assertThat(hostileOrigin.statusCode()).isEqualTo(403);

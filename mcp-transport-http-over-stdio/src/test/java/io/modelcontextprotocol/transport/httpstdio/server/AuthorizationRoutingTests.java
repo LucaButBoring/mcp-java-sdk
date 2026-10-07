@@ -205,9 +205,6 @@ class AuthorizationRoutingTests {
 		this.serverGroup = new DefaultEventLoopGroup();
 		this.server = HttpOverStdioServerTransport.builder(pair[1])
 			.eventLoopGroup(this.serverGroup)
-			// The SDK client still speaks the initialize lifecycle; the binding is not
-			// what this test is about.
-			.binding(null)
 			.allowedAuthorities(List.of("child.invalid:8443"))
 			.contextExtractor(request -> McpTransportContext.create(Map.of("resource", resourceOf(request))))
 			.authorizer(AuthorizationRoutingTests::requireToken)

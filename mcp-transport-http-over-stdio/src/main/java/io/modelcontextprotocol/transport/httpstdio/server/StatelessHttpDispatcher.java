@@ -26,9 +26,8 @@ import reactor.core.publisher.Mono;
 
 /**
  * Nonblocking stateless Streamable HTTP dispatch for one MCP endpoint request: HTTP
- * preflight, the optional 2026-07-28 header binding, handler invocation, and validation
- * of the handler's result. GET, DELETE, and all other non-POST methods are rejected with
- * HTTP 405.
+ * preflight, handler invocation, and validation of the handler's result. GET, DELETE, and
+ * all other non-POST methods are rejected with HTTP 405.
  */
 final class StatelessHttpDispatcher {
 
@@ -58,35 +57,17 @@ final class StatelessHttpDispatcher {
 
 	private final ServerHttpHeaderValidator headerValidator;
 
-	private final McpHttpBinding2026 binding;
-
-	private final StatelessHttpBindingValidator bindingValidator;
-
 	/**
 	 * Creates a dispatcher using the no-op HTTP security validator and an open server.
 	 */
 	public StatelessHttpDispatcher(McpJsonMapper jsonMapper, McpStatelessStreamingServerHandler handler,
 			long requestMaxSize) {
-		this(jsonMapper, handler, requestMaxSize, () -> false, ServerHttpHeaderValidator.NOOP, null);
+		this(jsonMapper, handler, requestMaxSize, () -> false, ServerHttpHeaderValidator.NOOP);
 	}
 
 	/** Creates a dispatcher. */
 	public StatelessHttpDispatcher(McpJsonMapper jsonMapper, McpStatelessStreamingServerHandler handler,
 			long requestMaxSize, BooleanSupplier closing, ServerHttpHeaderValidator headerValidator) {
-		this(jsonMapper, handler, requestMaxSize, closing, headerValidator, null);
-	}
-
-	/**
-	 * Creates a dispatcher that also enforces the MCP 2026-07-28 request-metadata binding
-	 * for JSON-RPC requests: protocol version, {@code Mcp-Method}, {@code Mcp-Name}, and
-	 * {@code Mcp-Param-*} headers must match the body, and an unknown method answers HTTP
-	 * 404. Notifications are not header-validated because 2026-07-28 defines no header
-	 * requirements for them.
-	 * @param binding binding configuration, or {@code null} for the legacy behavior
-	 */
-	public StatelessHttpDispatcher(McpJsonMapper jsonMapper, McpStatelessStreamingServerHandler handler,
-			long requestMaxSize, BooleanSupplier closing, ServerHttpHeaderValidator headerValidator,
-			McpHttpBinding2026 binding) {
 		Assert.notNull(jsonMapper, "jsonMapper must not be null");
 		Assert.notNull(handler, "handler must not be null");
 		Assert.isTrue(requestMaxSize > 0, "requestMaxSize must be positive");
@@ -97,9 +78,6 @@ final class StatelessHttpDispatcher {
 		this.requestMaxSize = requestMaxSize;
 		this.closing = closing;
 		this.headerValidator = headerValidator;
-		this.binding = binding;
-		this.bindingValidator = binding == null ? null
-				: new StatelessHttpBindingValidator(jsonMapper, binding, handler, JSON_HEADERS);
 	}
 
 	/**
@@ -123,27 +101,7 @@ final class StatelessHttpDispatcher {
 		Assert.notNull(body, "body must not be null");
 		Assert.notNull(transportContext, "transportContext must not be null");
 		Assert.notNull(protocolVersionHeader, "protocolVersionHeader must not be null");
-		if (this.binding != null) {
-			throw new IllegalStateException("HeaderAccessor is required when HTTP binding validation is configured");
-		}
-		return Mono.defer(() -> handleNow(body, transportContext, protocolVersionHeader, null));
-	}
-
-	/**
-	 * Runs only the message phase with the complete request headers, which binding
-	 * validation requires.
-	 * @param body decoded request body
-	 * @param transportContext transport context extracted by the front end
-	 * @param headers request headers
-	 * @return the response
-	 */
-	public Mono<StatelessHttpResponse> handle(String body, McpTransportContext transportContext,
-			HeaderAccessor headers) {
-		Assert.notNull(body, "body must not be null");
-		Assert.notNull(transportContext, "transportContext must not be null");
-		Assert.notNull(headers, "headers must not be null");
-		return Mono.defer(
-				() -> handleNow(body, transportContext, firstHeader(headers, HttpHeaders.PROTOCOL_VERSION), headers));
+		return Mono.defer(() -> handleNow(body, transportContext, protocolVersionHeader));
 	}
 
 	private Mono<StatelessHttpResponse> dispatchNow(Request request) {
@@ -170,13 +128,11 @@ final class StatelessHttpDispatcher {
 		if (request.body().getBytes(StandardCharsets.UTF_8).length > this.requestMaxSize) {
 			return Mono.just(empty(413));
 		}
-		return this.binding == null
-				? handle(request.body(), request.transportContext(), firstHeader(request, HttpHeaders.PROTOCOL_VERSION))
-				: handle(request.body(), request.transportContext(), request.headers());
+		return handle(request.body(), request.transportContext(), firstHeader(request, HttpHeaders.PROTOCOL_VERSION));
 	}
 
 	private Mono<StatelessHttpResponse> handleNow(String body, McpTransportContext transportContext,
-			Optional<String> protocolVersionHeader, HeaderAccessor headers) {
+			Optional<String> protocolVersionHeader) {
 		McpSchema.JSONRPCMessage message;
 		try {
 			message = McpSchema.deserializeJsonRpcMessage(this.jsonMapper, body);
@@ -186,12 +142,6 @@ final class StatelessHttpDispatcher {
 		}
 		if (!(message instanceof McpSchema.JSONRPCRequest) && !(message instanceof McpSchema.JSONRPCNotification)) {
 			return error(400, McpSchema.ErrorCodes.INVALID_REQUEST, MESSAGE_KIND_ERROR);
-		}
-
-		if (this.bindingValidator != null && message instanceof McpSchema.JSONRPCRequest request) {
-			return this.bindingValidator.validate(request, transportContext, headers)
-				.flatMap(error -> error.map(Mono::just)
-					.orElseGet(() -> invoke(message, transportContext, protocolVersionHeader)));
 		}
 		return invoke(message, transportContext, protocolVersionHeader);
 	}
@@ -213,11 +163,6 @@ final class StatelessHttpDispatcher {
 			.onErrorResume(exception -> handlerError(kind, exception.getMessage()));
 	}
 
-	private Optional<String> firstHeader(HeaderAccessor headers, String name) {
-		List<String> values = headers.getHeader(name);
-		return values == null ? Optional.empty() : values.stream().findFirst();
-	}
-
 	private Mono<StatelessHttpResponse> mapResult(McpSchema.JSONRPCMessage inbound, McpStatelessServerResult result) {
 		if (inbound instanceof McpSchema.JSONRPCNotification) {
 			if (result instanceof McpStatelessServerResult.Accepted) {
@@ -230,9 +175,7 @@ final class StatelessHttpDispatcher {
 		}
 		if (result instanceof McpStatelessServerResult.Single single) {
 			try {
-				int status = this.binding != null && single.response().error() != null
-						&& single.response().error().code() == McpSchema.ErrorCodes.METHOD_NOT_FOUND ? 404 : 200;
-				return Mono.just(new StatelessHttpResponse(status, JSON_HEADERS,
+				return Mono.just(new StatelessHttpResponse(200, JSON_HEADERS,
 						new StatelessHttpResponse.Json(this.jsonMapper.writeValueAsString(single.response()))));
 			}
 			catch (IOException exception) {

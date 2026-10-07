@@ -2,7 +2,7 @@
 
 This module runs the official [MCP conformance suite](https://github.com/modelcontextprotocol/conformance) against a stateless SDK server that is reachable only over HTTP/2 on a child process's stdin and stdout (`mcp-transport-http-over-stdio`).
 
-The conformance runner can only test a server at a URL, so `StdioBridge` launches `ConformanceStdioServer` as a child process and serves HTTP/1.1 on the loopback interface. It forwards each request unchanged to the child: method, path, query, body, and every header except hop-by-hop ones (the fixed set plus any header the message's `Connection` field names). `Host` becomes the HTTP/2 `:authority`. The child's response streams back with the same filtering, and a failure before the response starts (child exit, timeout) answers 502. Every MCP decision, including Origin and Host validation and the 2026-07-28 header checks, is made by the child.
+The conformance runner can only test a server at a URL, so `StdioBridge` launches `ConformanceStdioServer` as a child process and serves HTTP/1.1 on the loopback interface. It forwards each request unchanged to the child: method, path, query, body, and every header except hop-by-hop ones (the fixed set plus any header the message's `Connection` field names). `Host` becomes the HTTP/2 `:authority`. The child's response streams back with the same filtering, and a failure before the response starts (child exit, timeout) answers 502. Every MCP decision, including Origin and Host validation, is made by the child.
 
 The bridge has no authentication and binds to 127.0.0.1 only. It is a test harness, not a deployment component.
 
@@ -39,20 +39,18 @@ The run exits 0 when only baselined checks fail. It exits 1 on any new failure a
 
 ## Results
 
-Measured with conformance runner `0.2.0-alpha.12` at spec version 2026-07-28: 81 checks pass and 57 fail. Every transport and HTTP-binding scenario passes:
+Measured with conformance runner `0.2.0-alpha.12` at spec version 2026-07-28: 53 checks pass and 76 fail. Every check that exercises the transport passes:
 
-- `http-header-validation` (13/13 checks)
-- `http-custom-header-server-validation` (9/9)
 - `server-sse-multiple-streams`
+- `dns-rebinding-protection`
 - Origin, Host, and endpoint handling
 
-The one failing check in each of the first two is `wire-schema-valid`, which is an SDK-core issue.
+Each failure is listed per check in `conformance-baseline-2026-07-28.yml`. None of them comes from the transport:
 
-Each of the 57 failures is listed per check in `conformance-baseline-2026-07-28.yml`. All of them come from SDK-core gaps rather than from the transport:
-
+- Header and request-metadata validation (`http-header-validation`, `http-custom-header-server-validation`, and the related `server-stateless` checks) is deliberately not implemented here. It is general Streamable HTTP server logic that belongs in `mcp-core`.
 - 2026 result fields (`resultType`, `cacheScope`, `ttlMs`) are not emitted.
 - SEP-2549 caching hints are not emitted.
-- `server/discover`, request `_meta` validation, and the 2026 method inventory are not implemented. For example, `initialize` and `ping` still answer instead of returning 404.
+- `server/discover` and the 2026 method inventory are not implemented.
 - MRTR (`InputRequiredResult`) is not implemented.
 - Request-scoped progress is not supported. Stateless handlers have no notification sink, so `test_tool_with_progress` is omitted from the fixture.
 

@@ -1,10 +1,27 @@
 # Known failures for the HTTP-over-stdio conformance server at spec 2026-07-28.
-# Every entry is an SDK-core gap, not a transport defect; transport checks
-# (http-header-validation, http-custom-header-server-validation, server-sse-multiple-streams,
-# dns-rebinding, 202/404/400 mapping) are enforced. Entries are per check, so a new
+# No entry is a transport defect. Most are SDK-core gaps; the 2026 header and
+# request-metadata validation group is deliberately not implemented by this transport,
+# because that validation belongs in mcp-core. Transport checks (server-sse-multiple-streams,
+# dns-rebinding, Origin, 202/400/405 mapping) are enforced. Entries are per check, so a new
 # transport failure inside a listed scenario still fails the run.
 # Regenerate after SDK-core 2026 work lands; the runner flags stale entries.
 server:
+  # 2026 header and request-metadata validation (SEP-2243, SEP-2575): belongs in mcp-core
+  - http-custom-header-server-validation:sep-2243-server-decode-base64
+  - http-custom-header-server-validation:sep-2243-server-no-xmcp-tool
+  - http-custom-header-server-validation:sep-2243-server-reject-invalid-param-chars
+  - http-custom-header-server-validation:sep-2243-server-reject-param-mismatch
+  - http-custom-header-server-validation:sep-2243-server-validate-param-match
+  - http-header-validation:sep-2243-server-reject-error-code
+  - http-header-validation:sep-2243-server-reject-invalid-headers
+  - server-stateless:sep-2575-http-server-header-mismatch-400
+  - server-stateless:sep-2575-http-server-method-not-found-404
+  - server-stateless:sep-2575-http-server-method-not-found-404-logging-setlevel
+  - server-stateless:sep-2575-http-server-method-not-found-404-resources-subscribe
+  - server-stateless:sep-2575-http-server-method-not-found-404-resources-unsubscribe
+  - server-stateless:sep-2575-http-server-unsupported-version-400
+  - server-stateless:sep-2575-request-meta-invalid-missing-meta
+  - server-stateless:sep-2575-request-meta-invalid-missing-protocol-version
   # 2026 result fields (resultType, cacheScope, ttlMs) not emitted by SDK core
   - caching:wire-schema-valid
   - completion-complete:wire-schema-valid
@@ -48,7 +65,6 @@ server:
   - input-required-result-result-type:sep-2322-result-type-included
   - input-required-result-tampered-state:sep-2322-reject-tampered-state
   # server/discover, request _meta validation, and 2026 method inventory not implemented in SDK core
-  - dns-rebinding-protection:localhost-host-valid-accepted
   - server-stateless:sep-2575-discover-capabilities-match-handlers
   - server-stateless:sep-2575-http-server-meta-invalid-400
   - server-stateless:sep-2575-http-server-method-not-found-404-initialize

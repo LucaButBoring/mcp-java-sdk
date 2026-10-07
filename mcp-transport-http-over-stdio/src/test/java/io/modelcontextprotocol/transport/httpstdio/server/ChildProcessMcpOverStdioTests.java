@@ -42,10 +42,8 @@ class ChildProcessMcpOverStdioTests {
 		try {
 			await(() -> stderr.contains("ready"));
 			HttpRequest request = PipeRequests.request("POST", LOGICAL_URL + "/mcp",
-					Map.of("Accept", "application/json, text/event-stream", "Content-Type", "application/json",
-							"MCP-Protocol-Version", "2026-07-28", "Mcp-Method", "tools/list"),
-					"{\"jsonrpc\":\"2.0\",\"id\":\"7\",\"method\":\"tools/list\",\"params\":{\"_meta\":"
-							+ "{\"io.modelcontextprotocol/protocolVersion\":\"2026-07-28\"}}}");
+					Map.of("Accept", "application/json, text/event-stream", "Content-Type", "application/json"),
+					"{\"jsonrpc\":\"2.0\",\"id\":\"7\",\"method\":\"tools/list\"}");
 			var response = PipeRequests.sendNow(client.httpClient(), request);
 			assertThat(response.statusCode()).isEqualTo(200);
 			assertThat(response.headers().firstValue("content-type"))
@@ -53,13 +51,6 @@ class ChildProcessMcpOverStdioTests {
 			String body = PipeRequests.read(response);
 			assertThat(body).contains("\"id\":\"7\"").contains("\"method\":\"tools/list\"");
 			assertThat(body).doesNotContain("\"pid\":" + ProcessHandle.current().pid() + "}");
-
-			HttpRequest legacyShape = PipeRequests.request("POST", LOGICAL_URL + "/mcp",
-					Map.of("Accept", "application/json, text/event-stream"),
-					"{\"jsonrpc\":\"2.0\",\"id\":\"8\",\"method\":\"tools/list\"}");
-			var rejected = PipeRequests.sendNow(client.httpClient(), legacyShape);
-			assertThat(rejected.statusCode()).as("2026 binding is on by default in the child").isEqualTo(400);
-			assertThat(PipeRequests.read(rejected)).contains("\"code\":-32020");
 
 			HttpRequest notification = PipeRequests.request("POST", LOGICAL_URL + "/mcp",
 					Map.of("Accept", "application/json, text/event-stream"),

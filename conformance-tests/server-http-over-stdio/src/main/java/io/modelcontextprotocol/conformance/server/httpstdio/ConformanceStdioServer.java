@@ -40,8 +40,8 @@ import io.modelcontextprotocol.transport.httpstdio.server.HttpOverStdioServerTra
  * stateless SDK server, with the same tools, prompts, resources, and completions the
  * servlet conformance server uses wherever a stateless handler can produce them. Tools
  * that need a session exchange (sampling, elicitation, logging, progress) are omitted:
- * stateless handlers cannot produce them until the SDK-core 2026 work (Tracks B and C)
- * exists. Diagnostics go to stderr.
+ * stateless handlers cannot produce them until SDK core supports it. Diagnostics go to
+ * stderr.
  */
 public final class ConformanceStdioServer {
 
@@ -93,11 +93,6 @@ public final class ConformanceStdioServer {
 	}
 
 	private static List<McpStatelessServerFeatures.SyncToolSpecification> tools() {
-		Map<String, Object> headerSchema = Map.of("type", "object", "properties",
-				Map.of("region", Map.of("type", "string", "x-mcp-header", "Region"), "priority",
-						Map.of("type", "integer", "x-mcp-header", "Priority"), "verbose",
-						Map.of("type", "boolean", "x-mcp-header", "Verbose"), "query", Map.of("type", "string")),
-				"required", List.of("region"));
 		return List.of(tool(
 				Tool.builder("test_simple_text", EMPTY_JSON_SCHEMA)
 					.description("Returns simple text content for testing")
@@ -178,17 +173,7 @@ public final class ConformanceStdioServer {
 						() -> CallToolResult.builder()
 							.content(List.of(TextContent.builder("ok").build()))
 							.isError(false)
-							.build()),
-				// x-mcp-header coverage for the 2026-07-28 custom-header scenarios.
-				McpStatelessServerFeatures.SyncToolSpecification.builder()
-					.tool(Tool.builder("test_headers", headerSchema)
-						.description("Mirrors region, priority, and verbose into Mcp-Param headers")
-						.build())
-					.callHandler((context, request) -> CallToolResult.builder()
-						.content(List.of(TextContent.builder("headers ok: " + request.arguments()).build()))
-						.isError(false)
-						.build())
-					.build());
+							.build()));
 	}
 
 	private static List<McpStatelessServerFeatures.SyncPromptSpecification> prompts() {
