@@ -3,7 +3,6 @@ package io.modelcontextprotocol.transport.httpstdio.server;
 import java.util.Optional;
 
 import io.modelcontextprotocol.common.McpTransportContext;
-import io.modelcontextprotocol.server.transport.http.StatelessHttpResponse;
 import io.modelcontextprotocol.transport.httpstdio.http2.Http2Request;
 
 /**

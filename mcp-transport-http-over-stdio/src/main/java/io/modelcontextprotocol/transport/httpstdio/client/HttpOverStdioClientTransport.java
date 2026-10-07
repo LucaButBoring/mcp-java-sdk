@@ -15,7 +15,11 @@ import io.netty.channel.DefaultEventLoopGroup;
 import io.netty.channel.EventLoopGroup;
 import reactor.core.publisher.Mono;
 
-/** Owns a pipe HTTP/2 client and its optional child process. */
+/**
+ * Owns a pipe HTTP/2 client and its optional child process, and exposes it as a
+ * {@link java.net.http.HttpClient} for the SDK's existing Streamable HTTP client
+ * transport.
+ */
 public final class HttpOverStdioClientTransport implements AutoCloseable {
 
 	private static final Duration SHUTDOWN_GRACE = Duration.ofSeconds(2);
@@ -24,7 +28,7 @@ public final class HttpOverStdioClientTransport implements AutoCloseable {
 
 	private final PipeHttp2Client client;
 
-	private final NettyHttp2Exchange exchange;
+	private final PipeHttpClient httpClient;
 
 	private final ChildProcessLauncher child;
 
@@ -39,7 +43,7 @@ public final class HttpOverStdioClientTransport implements AutoCloseable {
 			ChildProcessLauncher child) {
 		this.eventLoopGroup = eventLoopGroup;
 		this.client = client;
-		this.exchange = new NettyHttp2Exchange(client);
+		this.httpClient = new PipeHttpClient(client);
 		this.child = child;
 	}
 
@@ -62,8 +66,15 @@ public final class HttpOverStdioClientTransport implements AutoCloseable {
 			.thenApply(client -> new HttpOverStdioClientTransport(group, client, child));
 	}
 
-	public NettyHttp2Exchange exchange() {
-		return this.exchange;
+	/**
+	 * Returns the {@link java.net.http.HttpClient} that sends requests to the child. Pass
+	 * {@code httpClient().asClientBuilder()} to
+	 * {@code HttpClientStreamableHttpTransport.Builder#clientBuilder}, or route it with
+	 * {@link LogicalAuthorityRoutingHttpClient}.
+	 * @return the pipe client
+	 */
+	public PipeHttpClient httpClient() {
+		return this.httpClient;
 	}
 
 	/**
@@ -76,7 +87,9 @@ public final class HttpOverStdioClientTransport implements AutoCloseable {
 	}
 
 	public HttpClientStreamableHttpTransport streamableTransport(String baseUri) {
-		return HttpClientStreamableHttpTransport.builder(baseUri).httpExchange(this.exchange).build();
+		return HttpClientStreamableHttpTransport.builder(baseUri)
+			.clientBuilder(this.httpClient.asClientBuilder())
+			.build();
 	}
 
 	public Mono<Void> closeGracefully() {

@@ -6,28 +6,19 @@ package io.modelcontextprotocol.server.transport;
 
 import java.io.IOException;
 import java.io.PrintWriter;
-import java.util.Iterator;
 import java.util.List;
-import java.util.Map;
-import java.util.Optional;
-import java.util.stream.Stream;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-import io.modelcontextprotocol.common.McpTransportContext;
 import io.modelcontextprotocol.json.McpJsonDefaults;
 import io.modelcontextprotocol.json.McpJsonMapper;
+
+import io.modelcontextprotocol.common.McpTransportContext;
 import io.modelcontextprotocol.server.McpStatelessServerHandler;
 import io.modelcontextprotocol.server.McpTransportContextExtractor;
-import io.modelcontextprotocol.server.transport.http.McpStatelessStreamingServerHandler;
-import io.modelcontextprotocol.server.transport.http.SseEvent;
-import io.modelcontextprotocol.server.transport.http.StatelessHttpDispatcher;
-import io.modelcontextprotocol.server.transport.http.StatelessHttpResponse;
-import io.modelcontextprotocol.server.transport.http.StatelessServerHandlerAdapter;
 import io.modelcontextprotocol.spec.McpError;
 import io.modelcontextprotocol.spec.McpSchema;
-import io.modelcontextprotocol.spec.HttpHeaders;
 import io.modelcontextprotocol.spec.McpStatelessServerTransport;
 import io.modelcontextprotocol.util.Assert;
 import jakarta.servlet.ServletException;
@@ -68,10 +59,6 @@ public class HttpServletStatelessServerTransport extends HttpServlet implements 
 	private final String mcpEndpoint;
 
 	private McpStatelessServerHandler mcpHandler;
-
-	private McpStatelessStreamingServerHandler streamingHandler;
-
-	private volatile StatelessHttpDispatcher dispatcher;
 
 	private McpTransportContextExtractor<HttpServletRequest> contextExtractor;
 
@@ -118,15 +105,6 @@ public class HttpServletStatelessServerTransport extends HttpServlet implements 
 	@Override
 	public void setMcpHandler(McpStatelessServerHandler mcpHandler) {
 		this.mcpHandler = mcpHandler;
-		this.streamingHandler = StatelessServerHandlerAdapter.adapt(mcpHandler);
-		this.dispatcher = new StatelessHttpDispatcher(this.jsonMapper, this.streamingHandler, this.requestMaxSize,
-				() -> this.isClosing, this.httpHeaderValidator);
-	}
-
-	void setStreamingHandler(McpStatelessStreamingServerHandler streamingHandler) {
-		this.streamingHandler = streamingHandler;
-		this.dispatcher = new StatelessHttpDispatcher(this.jsonMapper, streamingHandler, this.requestMaxSize,
-				() -> this.isClosing, this.httpHeaderValidator);
 	}
 
 	@Override
@@ -195,7 +173,7 @@ public class HttpServletStatelessServerTransport extends HttpServlet implements 
 		String accept = request.getHeader(ACCEPT);
 		if (accept == null || !(accept.contains(APPLICATION_JSON) && accept.contains(TEXT_EVENT_STREAM))) {
 			this.responseError(response, HttpServletResponse.SC_BAD_REQUEST,
-					McpError.builder(io.modelcontextprotocol.spec.McpSchema.ErrorCodes.METHOD_NOT_FOUND)
+					McpError.builder(McpSchema.ErrorCodes.METHOD_NOT_FOUND)
 						.message("Both application/json and text/event-stream required in Accept header")
 						.build());
 			return;
@@ -203,119 +181,69 @@ public class HttpServletStatelessServerTransport extends HttpServlet implements 
 
 		try {
 			String body = HttpServletRequestUtils.readBody(request, this.requestMaxSize);
-			StatelessHttpDispatcher currentDispatcher = this.dispatcher;
-			if (currentDispatcher == null) {
-				handleWithoutInstalledHandler(response, body, transportContext);
-				return;
+
+			McpSchema.JSONRPCMessage message = McpSchema.deserializeJsonRpcMessage(jsonMapper, body);
+
+			if (message instanceof McpSchema.JSONRPCRequest jsonrpcRequest) {
+				try {
+					McpSchema.JSONRPCResponse jsonrpcResponse = this.mcpHandler
+						.handleRequest(transportContext, jsonrpcRequest)
+						.contextWrite(ctx -> ctx.put(McpTransportContext.KEY, transportContext))
+						.block();
+
+					response.setContentType(APPLICATION_JSON);
+					response.setCharacterEncoding(UTF_8);
+					response.setStatus(HttpServletResponse.SC_OK);
+
+					String jsonResponseText = jsonMapper.writeValueAsString(jsonrpcResponse);
+					PrintWriter writer = response.getWriter();
+					writer.write(jsonResponseText);
+					writer.flush();
+				}
+				catch (Exception e) {
+					logger.error("Failed to handle request: {}", e.getMessage());
+					this.responseError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR,
+							McpError.builder(McpSchema.ErrorCodes.INTERNAL_ERROR)
+								.message("Failed to handle request: " + e.getMessage())
+								.build());
+				}
 			}
-			Optional<String> protocolVersion = Optional.ofNullable(request.getHeader(HttpHeaders.PROTOCOL_VERSION));
-			StatelessHttpResponse httpResponse = currentDispatcher.handle(body, transportContext, protocolVersion)
-				.block();
-			writeResponse(response, httpResponse);
+			else if (message instanceof McpSchema.JSONRPCNotification jsonrpcNotification) {
+				try {
+					this.mcpHandler.handleNotification(transportContext, jsonrpcNotification)
+						.contextWrite(ctx -> ctx.put(McpTransportContext.KEY, transportContext))
+						.block();
+					response.setStatus(HttpServletResponse.SC_ACCEPTED);
+				}
+				catch (Exception e) {
+					logger.error("Failed to handle notification: {}", e.getMessage());
+					this.responseError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR,
+							McpError.builder(McpSchema.ErrorCodes.INTERNAL_ERROR)
+								.message("Failed to handle notification: " + e.getMessage())
+								.build());
+				}
+			}
+			else {
+				this.responseError(response, HttpServletResponse.SC_BAD_REQUEST,
+						McpError.builder(McpSchema.ErrorCodes.INVALID_REQUEST)
+							.message("The server accepts either requests or notifications")
+							.build());
+			}
 		}
 		catch (MaxSizeExceededException e) {
 			response.sendError(HttpServletResponse.SC_REQUEST_ENTITY_TOO_LARGE);
 		}
+		catch (IllegalArgumentException | IOException e) {
+			logger.error("Failed to deserialize message: {}", e.getMessage());
+			this.responseError(response, HttpServletResponse.SC_BAD_REQUEST,
+					McpError.builder(McpSchema.ErrorCodes.INVALID_REQUEST).message("Invalid message format").build());
+		}
 		catch (Exception e) {
 			logger.error("Unexpected error handling message: {}", e.getMessage());
 			this.responseError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR,
-					McpError.builder(io.modelcontextprotocol.spec.McpSchema.ErrorCodes.INTERNAL_ERROR)
+					McpError.builder(McpSchema.ErrorCodes.INTERNAL_ERROR)
 						.message("Unexpected error: " + e.getMessage())
 						.build());
-		}
-	}
-
-	private void handleWithoutInstalledHandler(HttpServletResponse response, String body,
-			McpTransportContext transportContext) throws IOException {
-		McpSchema.JSONRPCMessage message;
-		try {
-			message = McpSchema.deserializeJsonRpcMessage(this.jsonMapper, body);
-		}
-		catch (IllegalArgumentException | IOException exception) {
-			this.responseError(response, HttpServletResponse.SC_BAD_REQUEST,
-					McpError.builder(McpSchema.ErrorCodes.INVALID_REQUEST).message("Invalid message format").build());
-			return;
-		}
-		if (message instanceof McpSchema.JSONRPCRequest jsonrpcRequest) {
-			try {
-				this.mcpHandler.handleRequest(transportContext, jsonrpcRequest)
-					.contextWrite(context -> context.put(McpTransportContext.KEY, transportContext))
-					.block();
-			}
-			catch (Exception exception) {
-				this.responseError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR,
-						McpError.builder(McpSchema.ErrorCodes.INTERNAL_ERROR)
-							.message("Failed to handle request: " + exception.getMessage())
-							.build());
-			}
-			return;
-		}
-		if (message instanceof McpSchema.JSONRPCNotification jsonrpcNotification) {
-			try {
-				this.mcpHandler.handleNotification(transportContext, jsonrpcNotification)
-					.contextWrite(context -> context.put(McpTransportContext.KEY, transportContext))
-					.block();
-			}
-			catch (Exception exception) {
-				this.responseError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR,
-						McpError.builder(McpSchema.ErrorCodes.INTERNAL_ERROR)
-							.message("Failed to handle notification: " + exception.getMessage())
-							.build());
-			}
-			return;
-		}
-		this.responseError(response, HttpServletResponse.SC_BAD_REQUEST,
-				McpError.builder(McpSchema.ErrorCodes.INVALID_REQUEST)
-					.message("The server accepts either requests or notifications")
-					.build());
-	}
-
-	private void writeResponse(HttpServletResponse response, StatelessHttpResponse httpResponse) throws IOException {
-		response.setStatus(httpResponse.status());
-		for (Map.Entry<String, List<String>> header : httpResponse.headers().entrySet()) {
-			if (!"Content-Type".equalsIgnoreCase(header.getKey())) {
-				for (String value : header.getValue()) {
-					response.addHeader(header.getKey(), value);
-				}
-			}
-		}
-		if (httpResponse.body() instanceof StatelessHttpResponse.Empty) {
-			return;
-		}
-		if (httpResponse.body() instanceof StatelessHttpResponse.Json json) {
-			if (!httpResponse.headers().containsKey("Content-Type")) {
-				response.sendError(httpResponse.status(), json.text());
-				return;
-			}
-			response.setContentType(APPLICATION_JSON);
-			response.setCharacterEncoding(UTF_8);
-			PrintWriter writer = response.getWriter();
-			writer.write(json.text());
-			writer.flush();
-			return;
-		}
-		response.setContentType(TEXT_EVENT_STREAM);
-		response.setCharacterEncoding(UTF_8);
-		PrintWriter writer = response.getWriter();
-		StatelessHttpResponse.Sse sse = (StatelessHttpResponse.Sse) httpResponse.body();
-		// toStream() registers the subscription's cancel as the Stream's onClose hook, so
-		// leaving this block for any reason (client disconnect, writer error, publisher
-		// failure) cancels the upstream handler Flux. toIterable() offers no such hook.
-		try (Stream<SseEvent> events = sse.events().toStream()) {
-			Iterator<SseEvent> iterator = events.iterator();
-			while (iterator.hasNext()) {
-				SseEvent event = iterator.next();
-				event.id().ifPresent(id -> writer.write("id: " + id + "\n"));
-				writer.write("event: " + event.event() + "\n");
-				writer.write("data: " + event.data() + "\n\n");
-				writer.flush();
-				if (writer.checkError()) {
-					return;
-				}
-			}
-		}
-		catch (RuntimeException exception) {
-			logger.error("Failed while writing SSE response: {}", exception.getMessage());
 		}
 	}
 

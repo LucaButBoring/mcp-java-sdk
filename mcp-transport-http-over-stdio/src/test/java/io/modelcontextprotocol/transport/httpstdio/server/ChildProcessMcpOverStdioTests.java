@@ -2,6 +2,7 @@ package io.modelcontextprotocol.transport.httpstdio.server;
 
 import java.net.URI;
 import java.net.http.HttpClient;
+import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
@@ -15,10 +16,7 @@ import java.util.stream.Collectors;
 import io.modelcontextprotocol.client.transport.HttpClientStreamableHttpTransport;
 import io.modelcontextprotocol.client.transport.HttpRequestSnapshot;
 import io.modelcontextprotocol.client.transport.McpHttpClientTransportAuthorizationException;
-import io.modelcontextprotocol.client.transport.http.McpHttpExchange;
-import io.modelcontextprotocol.client.transport.http.McpHttpHeaders;
-import io.modelcontextprotocol.client.transport.http.McpHttpRequest;
-import io.modelcontextprotocol.common.McpTransportContext;
+import io.modelcontextprotocol.transport.httpstdio.client.PipeRequests;
 import io.modelcontextprotocol.spec.McpSchema;
 import io.modelcontextprotocol.transport.httpstdio.client.HttpOverStdioClientTransport;
 import org.junit.jupiter.api.Test;
@@ -29,8 +27,8 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 /**
- * Phase 3 acceptance: both pipe ends wired onto the Phase 1 and Phase 2 seams across a
- * real {@code ProcessBuilder}-spawned child JVM.
+ * Phase 3 acceptance: both pipe ends wired onto the SDK's existing client and stateless
+ * server across a real {@code ProcessBuilder}-spawned child JVM.
  */
 class ChildProcessMcpOverStdioTests {
 
@@ -43,49 +41,32 @@ class ChildProcessMcpOverStdioTests {
 			.get(30, java.util.concurrent.TimeUnit.SECONDS);
 		try {
 			await(() -> stderr.contains("ready"));
-			McpHttpRequest request = McpHttpRequest.builder()
-				.method("POST")
-				.uri(URI.create(LOGICAL_URL + "/mcp"))
-				.headers(McpHttpHeaders.builder()
-					.add("Accept", "application/json, text/event-stream")
-					.add("Content-Type", "application/json")
-					.add("MCP-Protocol-Version", "2026-07-28")
-					.add("Mcp-Method", "tools/list")
-					.build())
-				.body("{\"jsonrpc\":\"2.0\",\"id\":\"7\",\"method\":\"tools/list\",\"params\":{\"_meta\":"
-						+ "{\"io.modelcontextprotocol/protocolVersion\":\"2026-07-28\"}}}")
-				.build();
-			var response = client.exchange().exchange(request, McpTransportContext.EMPTY).block(Duration.ofSeconds(10));
+			HttpRequest request = PipeRequests.request("POST", LOGICAL_URL + "/mcp",
+					Map.of("Accept", "application/json, text/event-stream", "Content-Type", "application/json",
+							"MCP-Protocol-Version", "2026-07-28", "Mcp-Method", "tools/list"),
+					"{\"jsonrpc\":\"2.0\",\"id\":\"7\",\"method\":\"tools/list\",\"params\":{\"_meta\":"
+							+ "{\"io.modelcontextprotocol/protocolVersion\":\"2026-07-28\"}}}");
+			var response = PipeRequests.sendNow(client.httpClient(), request);
 			assertThat(response.statusCode()).isEqualTo(200);
 			assertThat(response.headers().firstValue("content-type"))
 				.hasValueSatisfying(value -> assertThat(value).startsWith("application/json"));
-			String body = read(response.body());
+			String body = PipeRequests.read(response);
 			assertThat(body).contains("\"id\":\"7\"").contains("\"method\":\"tools/list\"");
 			assertThat(body).doesNotContain("\"pid\":" + ProcessHandle.current().pid() + "}");
 
-			McpHttpRequest legacyShape = McpHttpRequest.builder()
-				.method("POST")
-				.uri(URI.create(LOGICAL_URL + "/mcp"))
-				.headers(McpHttpHeaders.builder().add("Accept", "application/json, text/event-stream").build())
-				.body("{\"jsonrpc\":\"2.0\",\"id\":\"8\",\"method\":\"tools/list\"}")
-				.build();
-			var rejected = client.exchange()
-				.exchange(legacyShape, McpTransportContext.EMPTY)
-				.block(Duration.ofSeconds(10));
+			HttpRequest legacyShape = PipeRequests.request("POST", LOGICAL_URL + "/mcp",
+					Map.of("Accept", "application/json, text/event-stream"),
+					"{\"jsonrpc\":\"2.0\",\"id\":\"8\",\"method\":\"tools/list\"}");
+			var rejected = PipeRequests.sendNow(client.httpClient(), legacyShape);
 			assertThat(rejected.statusCode()).as("2026 binding is on by default in the child").isEqualTo(400);
-			assertThat(read(rejected.body())).contains("\"code\":-32020");
+			assertThat(PipeRequests.read(rejected)).contains("\"code\":-32020");
 
-			McpHttpRequest notification = McpHttpRequest.builder()
-				.method("POST")
-				.uri(URI.create(LOGICAL_URL + "/mcp"))
-				.headers(McpHttpHeaders.builder().add("Accept", "application/json, text/event-stream").build())
-				.body("{\"jsonrpc\":\"2.0\",\"method\":\"notifications/initialized\"}")
-				.build();
-			var accepted = client.exchange()
-				.exchange(notification, McpTransportContext.EMPTY)
-				.block(Duration.ofSeconds(10));
+			HttpRequest notification = PipeRequests.request("POST", LOGICAL_URL + "/mcp",
+					Map.of("Accept", "application/json, text/event-stream"),
+					"{\"jsonrpc\":\"2.0\",\"method\":\"notifications/initialized\"}");
+			var accepted = PipeRequests.sendNow(client.httpClient(), notification);
 			assertThat(accepted.statusCode()).isEqualTo(202);
-			assertThat(read(accepted.body())).isEmpty();
+			assertThat(PipeRequests.read(accepted)).isEmpty();
 			await(() -> stderr.contains("notification=notifications/initialized"));
 		}
 		finally {
@@ -111,15 +92,13 @@ class ChildProcessMcpOverStdioTests {
 		AtomicReference<HttpResponse.ResponseInfo> info = new AtomicReference<>();
 		try {
 			await(() -> stderr.contains("ready"));
-			// With httpExchange(...) set, the JDK request customizers are not consulted,
-			// so a
-			// host attaches credentials by decorating the functional exchange. The
-			// decorated
-			// request is what the pipe sends and what the authorization bridge reports.
-			McpHttpExchange authorizing = (outbound, context) -> client.exchange()
-				.exchange(withHeader(outbound, "Authorization", "Bearer stale-token"), context);
+			// Credentials are attached by the transport's existing request customizer,
+			// and
+			// the 401 reaches its existing authorization error handler.
 			HttpClientStreamableHttpTransport transport = HttpClientStreamableHttpTransport.builder(LOGICAL_URL)
-				.httpExchange(authorizing)
+				.clientBuilder(client.httpClient().asClientBuilder())
+				.httpRequestCustomizer(
+						(builder, method, uri, body, context) -> builder.header("Authorization", "Bearer stale-token"))
 				.authorizationErrorHandler((requestSnapshot, responseInfo, context) -> {
 					snapshot.set(requestSnapshot);
 					info.set(responseInfo);
@@ -153,20 +132,13 @@ class ChildProcessMcpOverStdioTests {
 			.get(30, java.util.concurrent.TimeUnit.SECONDS);
 		try {
 			await(() -> stderr.contains("ready"));
-			McpHttpRequest crash = McpHttpRequest.builder()
-				.method("POST")
-				.uri(URI.create(LOGICAL_URL + "/mcp"))
-				.headers(McpHttpHeaders.builder()
-					.add("Accept", "application/json, text/event-stream")
-					.add("MCP-Protocol-Version", "2026-07-28")
-					.add("Mcp-Method", "test/crash")
-					.build())
-				.body("{\"jsonrpc\":\"2.0\",\"id\":\"9\",\"method\":\"test/crash\",\"params\":{\"_meta\":"
-						+ "{\"io.modelcontextprotocol/protocolVersion\":\"2026-07-28\"}}}")
-				.build();
+			HttpRequest crash = PipeRequests.request("POST", LOGICAL_URL + "/mcp",
+					Map.of("Accept", "application/json, text/event-stream", "MCP-Protocol-Version", "2026-07-28",
+							"Mcp-Method", "test/crash"),
+					"{\"jsonrpc\":\"2.0\",\"id\":\"9\",\"method\":\"test/crash\",\"params\":{\"_meta\":"
+							+ "{\"io.modelcontextprotocol/protocolVersion\":\"2026-07-28\"}}}");
 			long started = System.nanoTime();
-			assertThatThrownBy(
-					() -> client.exchange().exchange(crash, McpTransportContext.EMPTY).block(Duration.ofSeconds(20)))
+			assertThatThrownBy(() -> PipeRequests.send(client.httpClient(), crash).block(Duration.ofSeconds(20)))
 				.as("the peer-close failure, not the 20 s blocking timeout")
 				.isInstanceOf(io.modelcontextprotocol.transport.httpstdio.http2.Http2TransportException.class)
 				.hasMessageContaining("closed before end-of-stream");
@@ -181,31 +153,12 @@ class ChildProcessMcpOverStdioTests {
 		}
 	}
 
-	private static McpHttpRequest withHeader(McpHttpRequest request, String name, String value) {
-		McpHttpRequest.Builder builder = McpHttpRequest.builder()
-			.method(request.method())
-			.uri(request.uri())
-			.headers(McpHttpHeaders.builder().addAll(request.headers().map()).add(name, value).build());
-		request.body().ifPresent(builder::body);
-		return builder.build();
-	}
-
 	private static List<String> command(String... args) {
 		String java = ProcessHandle.current().info().command().orElseThrow();
 		List<String> command = new java.util.ArrayList<>(
 				List.of(java, "-cp", System.getProperty("java.class.path"), StatelessEchoServerMain.class.getName()));
 		command.addAll(List.of(args));
 		return command;
-	}
-
-	private static String read(java.util.concurrent.Flow.Publisher<List<ByteBuffer>> body) {
-		return JdkFlowAdapter.flowPublisherToFlux(body)
-			.flatMapIterable(values -> values)
-			.map(buffer -> StandardCharsets.UTF_8.decode(buffer).toString())
-			.collectList()
-			.block(Duration.ofSeconds(10))
-			.stream()
-			.collect(Collectors.joining());
 	}
 
 	private static void await(CheckedBoolean condition) throws Exception {

@@ -2,7 +2,7 @@
  * Copyright 2026-2026 the original author or authors.
  */
 
-package io.modelcontextprotocol.server.transport.http;
+package io.modelcontextprotocol.transport.httpstdio.server;
 
 import java.util.Map;
 import java.util.Optional;
@@ -17,7 +17,7 @@ import reactor.test.StepVerifier;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
-class StatelessServerHandlerAdapterTests {
+class McpStatelessStreamingServerHandlerTests {
 
 	@Test
 	void requestMapsToSingleAndPropagatesTransportContext() {
@@ -31,8 +31,8 @@ class StatelessServerHandlerAdapterTests {
 		McpSchema.JSONRPCRequest request = new McpSchema.JSONRPCRequest("tools/list", "1");
 
 		StepVerifier
-			.create(StatelessServerHandlerAdapter.adapt(handler)
-				.handle(new McpStatelessServerExchange(transportContext, request, Optional.empty())))
+			.create(McpStatelessStreamingServerHandler.adapt(handler)
+				.handle(new McpStatelessStreamingServerHandler.Exchange(transportContext, request, Optional.empty())))
 			.assertNext(result -> {
 				assertThat(result).isEqualTo(new McpStatelessServerResult.Single(expected));
 				assertThat(reactorContext.get()).isSameAs(transportContext);
@@ -53,27 +53,27 @@ class StatelessServerHandlerAdapterTests {
 				"notifications/initialized", null);
 
 		StepVerifier
-			.create(StatelessServerHandlerAdapter.adapt(handler)
-				.handle(new McpStatelessServerExchange(transportContext, notification, Optional.empty())))
+			.create(McpStatelessStreamingServerHandler.adapt(handler)
+				.handle(new McpStatelessStreamingServerHandler.Exchange(transportContext, notification,
+						Optional.empty())))
 			.expectNext(new McpStatelessServerResult.Accepted())
 			.verifyComplete();
 		assertThat(reactorContext.get()).isSameAs(transportContext);
 	}
 
 	@Test
-	void otherMessageTypeFailsWithContractException() {
+	void otherMessageTypeIsRejected() {
 		McpStatelessServerHandler handler = new TestHandler((context, request) -> Mono.empty(),
 				(context, notification) -> Mono.empty());
 		McpSchema.JSONRPCResponse response = McpSchema.JSONRPCResponse.result("1", "unexpected");
 
 		StepVerifier
-			.create(StatelessServerHandlerAdapter.adapt(handler)
-				.handle(new McpStatelessServerExchange(McpTransportContext.EMPTY, response, Optional.empty())))
+			.create(McpStatelessStreamingServerHandler.adapt(handler)
+				.handle(new McpStatelessStreamingServerHandler.Exchange(McpTransportContext.EMPTY, response,
+						Optional.empty())))
 			.expectErrorSatisfies(error -> {
-				assertThat(error).isInstanceOf(McpStatelessContractException.class)
+				assertThat(error).isInstanceOf(IllegalArgumentException.class)
 					.hasMessage("The server accepts either requests or notifications");
-				assertThat(((McpStatelessContractException) error).getCode())
-					.isEqualTo(McpSchema.ErrorCodes.INVALID_REQUEST);
 			})
 			.verify();
 	}

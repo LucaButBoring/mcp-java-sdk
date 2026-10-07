@@ -2,7 +2,7 @@
  * Copyright 2026-2026 the original author or authors.
  */
 
-package io.modelcontextprotocol.server.transport.http;
+package io.modelcontextprotocol.transport.httpstdio.server;
 
 import java.util.Objects;
 

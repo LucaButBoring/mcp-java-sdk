@@ -12,14 +12,14 @@ import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Consumer;
 import java.util.stream.Collectors;
 
-import io.modelcontextprotocol.client.transport.http.McpHttpHeaders;
-import io.modelcontextprotocol.client.transport.http.McpHttpRequest;
-import io.modelcontextprotocol.client.transport.http.McpHttpResponse;
+import java.net.http.HttpRequest;
+import java.net.http.HttpResponse;
+import java.nio.ByteBuffer;
+import java.util.concurrent.Flow;
+import io.modelcontextprotocol.transport.httpstdio.client.PipeRequests;
 import io.modelcontextprotocol.common.McpTransportContext;
 import io.modelcontextprotocol.json.McpJsonDefaults;
 import io.modelcontextprotocol.server.McpStatelessServerHandler;
-import io.modelcontextprotocol.server.transport.http.SseEvent;
-import io.modelcontextprotocol.server.transport.http.StatelessHttpResponse;
 import io.modelcontextprotocol.spec.McpSchema;
 import io.modelcontextprotocol.spec.ProtocolVersions;
 import io.modelcontextprotocol.transport.httpstdio.client.HttpOverStdioClientTransport;
@@ -40,7 +40,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 
 class HttpOverStdioServerTransportTests {
 
-	private static final String V = ProtocolVersions.MCP_2026_07_28;
+	private static final String V = McpHttpBinding2026.PROTOCOL_VERSION;
 
 	private static final String LIST_BODY = "{\"jsonrpc\":\"2.0\",\"id\":\"1\",\"method\":\"tools/list\","
 			+ "\"params\":{\"_meta\":{\"io.modelcontextprotocol/protocolVersion\":\"" + V + "\"}}}";
@@ -88,7 +88,8 @@ class HttpOverStdioServerTransportTests {
 		connect(builder -> {
 		});
 		this.server.setMcpHandler(okHandler(new AtomicReference<>()));
-		McpHttpResponse response = send(post("/mcp", LIST_BODY, mcpHeaders("tools/list")));
+		HttpResponse<Flow.Publisher<List<ByteBuffer>>> response = send(
+				post("/mcp", LIST_BODY, mcpHeaders("tools/list")));
 		assertThat(response.statusCode()).isEqualTo(200);
 		assertThat(read(response)).contains("\"id\":\"1\"").contains("\"result\":\"ok\"");
 		assertThat(this.server.protocolVersions()).containsExactly(V);
@@ -106,7 +107,8 @@ class HttpOverStdioServerTransportTests {
 		connect(builder -> {
 		});
 		this.server.setMcpHandler(okHandler(new AtomicReference<>()));
-		McpHttpResponse response = send(post("/mcp", LIST_BODY, mcpHeaders("tools/call")));
+		HttpResponse<Flow.Publisher<List<ByteBuffer>>> response = send(
+				post("/mcp", LIST_BODY, mcpHeaders("tools/call")));
 		assertThat(response.statusCode()).isEqualTo(400);
 		assertThat(read(response)).contains("\"code\":-32020").contains("Mcp-Method");
 	}
@@ -138,7 +140,8 @@ class HttpOverStdioServerTransportTests {
 					StandardCharsets.UTF_8), true);
 		}));
 		this.server.setMcpHandler(okHandler(new AtomicReference<>()));
-		McpHttpResponse metadata = send(request("GET", "/.well-known/oauth-protected-resource/mcp", null, Map.of()));
+		HttpResponse<Flow.Publisher<List<ByteBuffer>>> metadata = send(
+				request("GET", "/.well-known/oauth-protected-resource/mcp", null, Map.of()));
 		assertThat(metadata.statusCode()).isEqualTo(200);
 		assertThat(read(metadata)).contains("/.well-known/oauth-protected-resource/mcp");
 		assertThat(send(post("/mcp?x=1", LIST_BODY, mcpHeaders("tools/list"))).statusCode())
@@ -168,12 +171,13 @@ class HttpOverStdioServerTransportTests {
 		Map<String, String> hostile = new java.util.LinkedHashMap<>(mcpHeaders("tools/list"));
 		hostile.put("Origin", "https://evil.example");
 		assertThat(send(post("/mcp", LIST_BODY, hostile)).statusCode()).as("before setMcpHandler").isEqualTo(403);
-		McpHttpResponse routed = send(request("GET", "/.well-known/oauth-protected-resource/mcp", null, hostile));
+		HttpResponse<Flow.Publisher<List<ByteBuffer>>> routed = send(
+				request("GET", "/.well-known/oauth-protected-resource/mcp", null, hostile));
 		assertThat(routed.statusCode()).as("application route").isEqualTo(403);
 		assertThat(routed.headers().firstValue("content-type")).contains("application/json");
 		assertThat(read(routed)).isEqualTo("Invalid Origin header");
 		this.server.setMcpHandler(okHandler(new AtomicReference<>()));
-		McpHttpResponse dispatched = send(post("/mcp", LIST_BODY, hostile));
+		HttpResponse<Flow.Publisher<List<ByteBuffer>>> dispatched = send(post("/mcp", LIST_BODY, hostile));
 		assertThat(dispatched.statusCode()).isEqualTo(403);
 		assertThat(dispatched.headers().firstValue("content-type")).contains("application/json");
 		assertThat(read(dispatched)).isEqualTo("Invalid Origin header");
@@ -212,13 +216,13 @@ class HttpOverStdioServerTransportTests {
 	@Test
 	void sseResponseUsesServletWireFormatAndClientCancelDisposesTheFlux() throws Exception {
 		CountDownLatch disposed = new CountDownLatch(1);
-		Sinks.Many<SseEvent> live = Sinks.many().unicast().onBackpressureBuffer();
+		Sinks.Many<StatelessHttpResponse.SseEvent> live = Sinks.many().unicast().onBackpressureBuffer();
 		DuplexByteChannel[] pair = InMemoryDuplexByteChannel.pair(4096);
 		this.serverGroup = new DefaultEventLoopGroup();
 		PipeHttp2Server raw = PipeHttp2Server.start(pair[1], this.serverGroup, null, (request, writer) -> {
-			Flux<SseEvent> events = "/finite".equals(request.path())
-					? Flux.just(new SseEvent(Optional.of("e1"), "message", "{\"a\":1}"),
-							new SseEvent(Optional.empty(), "message", "{\"b\":2}"))
+			Flux<StatelessHttpResponse.SseEvent> events = "/finite".equals(request.path())
+					? Flux.just(new StatelessHttpResponse.SseEvent(Optional.of("e1"), "message", "{\"a\":1}"),
+							new StatelessHttpResponse.SseEvent(Optional.empty(), "message", "{\"b\":2}"))
 					: live.asFlux().doOnCancel(disposed::countDown);
 			HttpOverStdioServerTransport.writeResponse(writer,
 					new StatelessHttpResponse(200, Map.of(), new StatelessHttpResponse.Sse(events)),
@@ -226,15 +230,15 @@ class HttpOverStdioServerTransportTests {
 		});
 		this.client = HttpOverStdioClientTransport.connect(pair[0]).get(5, TimeUnit.SECONDS);
 		try {
-			McpHttpResponse finite = send(request("GET", "/finite", null, Map.of()));
+			HttpResponse<Flow.Publisher<List<ByteBuffer>>> finite = send(request("GET", "/finite", null, Map.of()));
 			assertThat(finite.headers().firstValue("content-type")).contains("text/event-stream");
 			assertThat(read(finite))
 				.isEqualTo("id: e1\nevent: message\ndata: {\"a\":1}\n\nevent: message\ndata: {\"b\":2}\n\n");
 
-			McpHttpResponse open = send(request("GET", "/live", null, Map.of()));
+			HttpResponse<Flow.Publisher<List<ByteBuffer>>> open = send(request("GET", "/live", null, Map.of()));
 			CountDownLatch first = new CountDownLatch(1);
 			Disposable reading = JdkFlowAdapter.flowPublisherToFlux(open.body()).subscribe(chunk -> first.countDown());
-			live.tryEmitNext(new SseEvent(Optional.empty(), "message", "{}"));
+			live.tryEmitNext(new StatelessHttpResponse.SseEvent(Optional.empty(), "message", "{}"));
 			assertThat(first.await(5, TimeUnit.SECONDS)).isTrue();
 			reading.dispose();
 			assertThat(disposed.await(5, TimeUnit.SECONDS)).as("client RST_STREAM must cancel the server Flux")
@@ -275,17 +279,17 @@ class HttpOverStdioServerTransportTests {
 	void finiteStreamsDoNotEmitKeepAliveComments() throws Exception {
 		DuplexByteChannel[] pair = InMemoryDuplexByteChannel.pair(4096);
 		this.serverGroup = new DefaultEventLoopGroup();
-		Sinks.Many<SseEvent> live = Sinks.many().unicast().onBackpressureBuffer();
+		Sinks.Many<StatelessHttpResponse.SseEvent> live = Sinks.many().unicast().onBackpressureBuffer();
 		PipeHttp2Server raw = PipeHttp2Server.start(pair[1], this.serverGroup, null, (request, writer) -> {
 			boolean listen = "/listen".equals(request.path());
-			Flux<SseEvent> idle = listen ? live.asFlux() : Flux.never();
+			Flux<StatelessHttpResponse.SseEvent> idle = listen ? live.asFlux() : Flux.never();
 			HttpOverStdioServerTransport.writeResponse(writer,
 					new StatelessHttpResponse(200, Map.of(), new StatelessHttpResponse.Sse(idle, listen)),
 					Duration.ofMillis(100));
 		});
 		this.client = HttpOverStdioClientTransport.connect(pair[0]).get(5, TimeUnit.SECONDS);
 		try {
-			McpHttpResponse listen = send(request("GET", "/listen", null, Map.of()));
+			HttpResponse<Flow.Publisher<List<ByteBuffer>>> listen = send(request("GET", "/listen", null, Map.of()));
 			CountDownLatch comment = new CountDownLatch(1);
 			Disposable reading = JdkFlowAdapter.flowPublisherToFlux(listen.body())
 				.flatMapIterable(values -> values)
@@ -298,7 +302,7 @@ class HttpOverStdioServerTransportTests {
 			assertThat(comment.await(5, TimeUnit.SECONDS)).as("long-lived stream keep-alive").isTrue();
 			reading.dispose();
 
-			McpHttpResponse scoped = send(request("GET", "/scoped", null, Map.of()));
+			HttpResponse<Flow.Publisher<List<ByteBuffer>>> scoped = send(request("GET", "/scoped", null, Map.of()));
 			List<String> seen = new java.util.concurrent.CopyOnWriteArrayList<>();
 			Disposable scopedReading = JdkFlowAdapter.flowPublisherToFlux(scoped.body())
 				.flatMapIterable(values -> values)
@@ -352,35 +356,20 @@ class HttpOverStdioServerTransportTests {
 		return headers;
 	}
 
-	private static McpHttpRequest post(String target, String body, Map<String, String> headers) {
+	private static HttpRequest post(String target, String body, Map<String, String> headers) {
 		return request("POST", target, body, headers);
 	}
 
-	private static McpHttpRequest request(String method, String target, String body, Map<String, String> headers) {
-		McpHttpHeaders.Builder values = McpHttpHeaders.builder();
-		headers.forEach(values::add);
-		McpHttpRequest.Builder builder = McpHttpRequest.builder()
-			.method(method)
-			.uri(URI.create(target.startsWith("/") ? "http://pipe" + target : target))
-			.headers(values.build());
-		if (body != null) {
-			builder.body(body);
-		}
-		return builder.build();
+	private static HttpRequest request(String method, String target, String body, Map<String, String> headers) {
+		return PipeRequests.request(method, target.startsWith("/") ? "http://pipe" + target : target, headers, body);
 	}
 
-	private McpHttpResponse send(McpHttpRequest request) {
-		return this.client.exchange().exchange(request, McpTransportContext.EMPTY).block(Duration.ofSeconds(5));
+	private HttpResponse<Flow.Publisher<List<ByteBuffer>>> send(HttpRequest request) {
+		return PipeRequests.sendNow(this.client.httpClient(), request);
 	}
 
-	private static String read(McpHttpResponse response) {
-		return JdkFlowAdapter.flowPublisherToFlux(response.body())
-			.flatMapIterable(values -> values)
-			.map(buffer -> StandardCharsets.UTF_8.decode(buffer).toString())
-			.collectList()
-			.block(Duration.ofSeconds(5))
-			.stream()
-			.collect(Collectors.joining());
+	private static String read(HttpResponse<Flow.Publisher<List<ByteBuffer>>> response) {
+		return PipeRequests.read(response);
 	}
 
 	private static void sleep(long millis) {

@@ -4,23 +4,20 @@ import java.net.Inet4Address;
 import java.net.InetAddress;
 import java.net.URI;
 import java.net.UnknownHostException;
+import java.net.http.HttpClient;
+import java.net.http.HttpRequest;
+import java.net.http.HttpResponse;
 import java.util.LinkedHashMap;
-import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
-
-import io.modelcontextprotocol.client.transport.http.McpHttpExchange;
-import io.modelcontextprotocol.client.transport.http.McpHttpRequest;
-import io.modelcontextprotocol.client.transport.http.McpHttpResponse;
-import io.modelcontextprotocol.common.McpTransportContext;
-import reactor.core.publisher.Mono;
+import java.util.concurrent.CompletableFuture;
 
 /**
- * Routes each HTTP exchange by logical origin: requests whose origin matches a configured
- * child go to that child's pipe exchange; every other request goes to the network
- * exchange.
+ * A {@link HttpClient} that routes each request by logical origin: requests whose origin
+ * matches a configured child go to that child's {@link PipeHttpClient}; every other
+ * request goes to the network client.
  *
  * <p>
  * The routing is a security boundary and fails closed:
@@ -30,73 +27,61 @@ import reactor.core.publisher.Mono;
  * <li>A request whose host is a routed child's host but whose origin differs (another
  * scheme or port), or that carries userinfo, is rejected. Sending it to the network would
  * resolve the child's private name through DNS.</li>
- * <li>Responses, including redirects, are returned unchanged. Nothing here follows a
- * redirect, so a child-bound {@code Authorization} header cannot be replayed to another
- * origin.</li>
+ * <li>Responses, including redirects, are returned unchanged. The network client must not
+ * follow redirects itself, so a child-bound {@code Authorization} header cannot be
+ * replayed to another origin.</li>
  * </ul>
  *
  * <p>
  * Origins compare as scheme, host, and port: scheme and host case-insensitively, the
  * default port for {@code http} (80) or {@code https} (443) equal to an explicit one, a
  * single trailing dot on the host ignored, and IP literals compared by address. Hosts are
- * compared in ASCII; configure an internationalized name in its punycode form. A request
- * whose authority cannot be parsed into a host (for example a non-ASCII host, or a
- * malformed numeric IPv4 host) is rejected rather than sent to the network. Paths,
- * queries, and fragments do not affect routing.
- *
- * <p>
- * Spellings that a network client would resolve to a routed child's address, but that the
- * child could not recognize in {@code :authority}, are rejected rather than routed: the
- * short, hexadecimal, and octal IPv4 forms (for example {@code 2130706433} for
- * {@code 127.0.0.1}), IPv4-mapped IPv6 literals, and ports with leading zeros. A
- * pipe-bound request whose {@code Host} header differs from its URI authority is also
- * rejected (RFC 9113 section 8.3.1), so the child sees one authority.
+ * compared in ASCII; configure an internationalized name in its punycode form. Spellings
+ * that a network client would resolve to a routed child's address, but that the child
+ * could not recognize in {@code :authority}, are rejected rather than routed: the short,
+ * hexadecimal, and octal IPv4 forms (for example {@code 2130706433} for
+ * {@code 127.0.0.1}), IPv4-mapped IPv6 literals, and ports with leading zeros.
  */
-public final class LogicalAuthorityRoutingExchange implements McpHttpExchange {
+public final class LogicalAuthorityRoutingHttpClient extends SendAsyncHttpClient {
 
-	private final Map<Origin, McpHttpExchange> routes;
+	private final Map<Origin, HttpClient> routes;
 
-	private final McpHttpExchange network;
+	private final HttpClient network;
 
-	private LogicalAuthorityRoutingExchange(Map<Origin, McpHttpExchange> routes, McpHttpExchange network) {
+	private LogicalAuthorityRoutingHttpClient(Map<Origin, HttpClient> routes, HttpClient network) {
 		this.routes = Map.copyOf(routes);
 		this.network = network;
 	}
 
 	/**
-	 * @param network exchange for every origin that is not routed to a child
+	 * @param network client for every origin that is not routed to a child; it must not
+	 * follow redirects
 	 * @return a builder
 	 */
-	public static Builder builder(McpHttpExchange network) {
+	public static Builder builder(HttpClient network) {
 		return new Builder(network);
 	}
 
 	@Override
-	public Mono<McpHttpResponse> exchange(McpHttpRequest request, McpTransportContext context) {
-		return Mono.defer(() -> {
-			URI uri = request.uri();
-			Optional<Origin> origin = Origin.of(uri);
-			McpHttpExchange pipe = origin.map(this.routes::get).orElse(null);
-			if (pipe != null && uri.getRawUserInfo() == null && Origin.spelledCanonically(uri)) {
-				List<String> host = request.headers().allValues("host");
-				if (!host.isEmpty() && (host.size() > 1 || !host.get(0).equalsIgnoreCase(uri.getRawAuthority()))) {
-					return Mono.error(new IllegalArgumentException("Refusing to send " + redacted(uri)
-							+ " to its child: the Host header must be absent or equal to the URI authority"));
-				}
-				return pipe.exchange(request, context);
-			}
-			if (origin.isEmpty() && uri.getRawAuthority() != null) {
-				return Mono.error(new IllegalArgumentException(
-						"Refusing to route a request whose authority cannot be classified: " + uri.getScheme()
-								+ " URL with a non-ASCII or otherwise unparsed host; use the ASCII (punycode) form"));
-			}
-			if (claimsRoutedHost(uri)) {
-				return Mono.error(new IllegalArgumentException("Refusing to send " + redacted(uri)
-						+ " to the network: its host is routed to a child process, and only the routed "
-						+ "origin, spelled canonically and without userinfo, is accepted"));
-			}
-			return this.network.exchange(request, context);
-		});
+	public <T> CompletableFuture<HttpResponse<T>> sendAsync(HttpRequest request,
+			HttpResponse.BodyHandler<T> responseBodyHandler) {
+		URI uri = request.uri();
+		Optional<Origin> origin = Origin.of(uri);
+		HttpClient pipe = origin.map(this.routes::get).orElse(null);
+		if (pipe != null && uri.getRawUserInfo() == null && Origin.spelledCanonically(uri)) {
+			return pipe.sendAsync(request, responseBodyHandler);
+		}
+		if (origin.isEmpty() && uri.getRawAuthority() != null) {
+			return CompletableFuture.failedFuture(new IllegalArgumentException(
+					"Refusing to route a request whose authority cannot be classified: " + uri.getScheme()
+							+ " URL with a non-ASCII or otherwise unparsed host; use the ASCII (punycode) form"));
+		}
+		if (claimsRoutedHost(uri)) {
+			return CompletableFuture.failedFuture(new IllegalArgumentException("Refusing to send " + redacted(uri)
+					+ " to the network: its host is routed to a child process, and only the routed "
+					+ "origin, spelled canonically and without userinfo, is accepted"));
+		}
+		return this.network.sendAsync(request, responseBodyHandler);
 	}
 
 	/** Whether the URI names any routed child's host, regardless of scheme or port. */
@@ -109,26 +94,29 @@ public final class LogicalAuthorityRoutingExchange implements McpHttpExchange {
 		return uri.getScheme() + "://" + uri.getHost() + (uri.getPort() < 0 ? "" : ":" + uri.getPort());
 	}
 
-	/** Configures a {@link LogicalAuthorityRoutingExchange}. */
+	/** Configures a {@link LogicalAuthorityRoutingHttpClient}. */
 	public static final class Builder {
 
-		private final McpHttpExchange network;
+		private final HttpClient network;
 
-		private final Map<Origin, McpHttpExchange> routes = new LinkedHashMap<>();
+		private final Map<Origin, HttpClient> routes = new LinkedHashMap<>();
 
-		private Builder(McpHttpExchange network) {
+		private Builder(HttpClient network) {
 			this.network = Objects.requireNonNull(network, "network");
+			if (network.followRedirects() != HttpClient.Redirect.NEVER) {
+				throw new IllegalArgumentException("The network client must not follow redirects");
+			}
 		}
 
 		/**
 		 * Routes one logical origin to a child.
 		 * @param logicalOrigin an absolute {@code http} or {@code https} URL; only its
 		 * scheme, host, and port are used, for example {@code https://child.invalid:8443}
-		 * @param pipe the child's exchange, usually
-		 * {@link HttpOverStdioClientTransport#exchange()}
+		 * @param pipe the child's client, usually
+		 * {@link HttpOverStdioClientTransport#httpClient()}
 		 * @return this builder
 		 */
-		public Builder route(String logicalOrigin, McpHttpExchange pipe) {
+		public Builder route(String logicalOrigin, HttpClient pipe) {
 			Objects.requireNonNull(pipe, "pipe");
 			URI uri = URI.create(logicalOrigin);
 			if (uri.getRawUserInfo() != null) {
@@ -147,11 +135,11 @@ public final class LogicalAuthorityRoutingExchange implements McpHttpExchange {
 			return this;
 		}
 
-		public LogicalAuthorityRoutingExchange build() {
+		public LogicalAuthorityRoutingHttpClient build() {
 			if (this.routes.isEmpty()) {
 				throw new IllegalStateException("At least one origin must be routed to a child");
 			}
-			return new LogicalAuthorityRoutingExchange(this.routes, this.network);
+			return new LogicalAuthorityRoutingHttpClient(this.routes, this.network);
 		}
 
 	}

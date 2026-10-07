@@ -63,7 +63,7 @@ class HttpOverStdioStatelessSharedIntegrationTests extends AbstractStatelessInte
 				McpClient
 					.sync(HttpClientStreamableHttpTransport.builder("http://pipe")
 						.endpoint(mcpEndpoint)
-						.httpExchange(this.clientTransport.exchange())
+						.clientBuilder(this.clientTransport.httpClient().asClientBuilder())
 						.build())
 					.initializationTimeout(Duration.ofSeconds(20))
 					.requestTimeout(Duration.ofSeconds(20)));

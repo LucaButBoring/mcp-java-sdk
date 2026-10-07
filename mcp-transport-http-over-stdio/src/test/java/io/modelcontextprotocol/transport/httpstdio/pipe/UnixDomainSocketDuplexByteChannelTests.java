@@ -17,11 +17,13 @@ import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.stream.Collectors;
 
-import io.modelcontextprotocol.client.transport.http.McpHttpHeaders;
-import io.modelcontextprotocol.client.transport.http.McpHttpRequest;
-import io.modelcontextprotocol.client.transport.http.McpHttpResponse;
+import java.net.http.HttpRequest;
+import java.net.http.HttpResponse;
+import java.nio.ByteBuffer;
+import java.util.concurrent.Flow;
+import io.modelcontextprotocol.transport.httpstdio.client.PipeRequests;
 import io.modelcontextprotocol.common.McpTransportContext;
-import io.modelcontextprotocol.server.transport.http.McpStatelessServerResult;
+import io.modelcontextprotocol.transport.httpstdio.server.McpStatelessServerResult;
 import io.modelcontextprotocol.spec.McpSchema;
 import io.modelcontextprotocol.transport.httpstdio.client.HttpOverStdioClientTransport;
 import io.modelcontextprotocol.transport.httpstdio.server.HttpOverStdioServerTransport;
@@ -160,7 +162,7 @@ class UnixDomainSocketDuplexByteChannelTests {
 			.get(10, TimeUnit.SECONDS);
 		try {
 			List<String> bodies = Flux.range(0, 16)
-				.flatMap(n -> client.exchange().exchange(post(n), McpTransportContext.EMPTY).flatMap(response -> {
+				.flatMap(n -> PipeRequests.send(client.httpClient(), post(n)).flatMap(response -> {
 					assertThat(response.statusCode()).isEqualTo(200);
 					return body(response);
 				}), 16)
@@ -184,26 +186,17 @@ class UnixDomainSocketDuplexByteChannelTests {
 		return channel;
 	}
 
-	private static McpHttpRequest post(int n) {
+	private static HttpRequest post(int n) {
 		String body = "{\"jsonrpc\":\"2.0\",\"id\":\"" + n + "\",\"method\":\"tools/list\",\"params\":{\"_meta\":"
 				+ "{\"io.modelcontextprotocol/protocolVersion\":\"2026-07-28\"}}}";
-		return McpHttpRequest.builder()
-			.method("POST")
-			.uri(URI.create("http://pipe/mcp"))
-			.headers(McpHttpHeaders.builder()
-				.add("Accept", "application/json, text/event-stream")
-				.add("MCP-Protocol-Version", "2026-07-28")
-				.add("Mcp-Method", "tools/list")
-				.build())
-			.body(body)
-			.build();
+		return PipeRequests.request("POST", "http://pipe/mcp",
+				java.util.Map.of("Accept", "application/json, text/event-stream", "MCP-Protocol-Version", "2026-07-28",
+						"Mcp-Method", "tools/list"),
+				body);
 	}
 
-	private static Mono<String> body(McpHttpResponse response) {
-		return JdkFlowAdapter.flowPublisherToFlux(response.body())
-			.flatMapIterable(values -> values)
-			.map(buffer -> StandardCharsets.UTF_8.decode(buffer).toString())
-			.collect(Collectors.joining());
+	private static Mono<String> body(HttpResponse<Flow.Publisher<List<ByteBuffer>>> response) {
+		return PipeRequests.body(response);
 	}
 
 	private static CountDownLatch eofLatch(NettyPipeChannel channel) {

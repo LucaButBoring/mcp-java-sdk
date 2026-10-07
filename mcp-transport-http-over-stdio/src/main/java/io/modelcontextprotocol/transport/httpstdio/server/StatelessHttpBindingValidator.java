@@ -2,7 +2,7 @@
  * Copyright 2026-2026 the original author or authors.
  */
 
-package io.modelcontextprotocol.server.transport.http;
+package io.modelcontextprotocol.transport.httpstdio.server;
 
 import java.io.IOException;
 import java.math.BigDecimal;
@@ -15,8 +15,6 @@ import io.modelcontextprotocol.json.McpJsonMapper;
 import io.modelcontextprotocol.server.transport.HeaderAccessor;
 import io.modelcontextprotocol.spec.HttpHeaders;
 import io.modelcontextprotocol.spec.McpSchema;
-import io.modelcontextprotocol.spec.http.McpHeaderValueCodec;
-import io.modelcontextprotocol.spec.http.McpToolHeaderBindings;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import reactor.core.publisher.Mono;
@@ -56,7 +54,8 @@ final class StatelessHttpBindingValidator {
 	Mono<Optional<StatelessHttpResponse>> validate(McpSchema.JSONRPCRequest request, McpTransportContext context,
 			HeaderAccessor headers) {
 		Map<String, Object> params = asMap(request.params());
-		for (String scalar : List.of(HttpHeaders.PROTOCOL_VERSION, HttpHeaders.MCP_METHOD, HttpHeaders.MCP_NAME)) {
+		for (String scalar : List.of(HttpHeaders.PROTOCOL_VERSION, McpHttpBinding2026.MCP_METHOD,
+				McpHttpBinding2026.MCP_NAME)) {
 			if (count(headers, scalar) > 1) {
 				return mismatch(request, scalar + " header must appear exactly once");
 			}
@@ -78,11 +77,11 @@ final class StatelessHttpBindingValidator {
 					+ "' does not match body value '" + bodyVersion + "'");
 		}
 		if (!this.binding.supportedVersions().contains(version.get())) {
-			return reject(request, McpSchema.ErrorCodes.UNSUPPORTED_PROTOCOL_VERSION,
+			return reject(request, McpHttpBinding2026.UNSUPPORTED_PROTOCOL_VERSION,
 					"Unsupported protocol version: " + version.get(),
 					Map.of("supported", this.binding.supportedVersions(), "requested", version.get()));
 		}
-		Optional<String> method = first(headers, HttpHeaders.MCP_METHOD);
+		Optional<String> method = first(headers, McpHttpBinding2026.MCP_METHOD);
 		if (method.isEmpty()) {
 			return mismatch(request, "Mcp-Method header is required");
 		}
@@ -95,7 +94,7 @@ final class StatelessHttpBindingValidator {
 			return Mono.just(Optional.empty());
 		}
 		Object bodyName = params.get(nameField);
-		Optional<String> nameHeader = first(headers, HttpHeaders.MCP_NAME);
+		Optional<String> nameHeader = first(headers, McpHttpBinding2026.MCP_NAME);
 		if (nameHeader.isEmpty()) {
 			return mismatch(request, "Mcp-Name header is required for " + request.method());
 		}
@@ -124,15 +123,15 @@ final class StatelessHttpBindingValidator {
 		}
 		Map<String, Object> arguments = asMap(params.get("arguments"));
 		for (McpToolHeaderBindings.Binding binding : ((McpToolHeaderBindings.Valid) parsed).bindings()) {
-			String headerName = HttpHeaders.MCP_PARAM_PREFIX + binding.headerName();
+			String headerName = McpHttpBinding2026.MCP_PARAM_PREFIX + binding.headerName();
 			if (count(headers, headerName) > 1) {
-				return Optional.of(error(request, McpSchema.ErrorCodes.HEADER_MISMATCH,
+				return Optional.of(error(request, McpHttpBinding2026.HEADER_MISMATCH,
 						"Header mismatch: " + headerName + " header must appear exactly once", null));
 			}
 			Optional<String> header = first(headers, headerName);
 			Optional<String> decoded = header.flatMap(McpHeaderValueCodec::decode);
 			if (header.isPresent() && decoded.isEmpty()) {
-				return Optional.of(error(request, McpSchema.ErrorCodes.HEADER_MISMATCH,
+				return Optional.of(error(request, McpHttpBinding2026.HEADER_MISMATCH,
 						"Header mismatch: " + headerName + " header value contains invalid characters", null));
 			}
 			Optional<Object> value = McpToolHeaderBindings.extract(arguments, binding);
@@ -140,12 +139,12 @@ final class StatelessHttpBindingValidator {
 				continue;
 			}
 			if (decoded.isEmpty()) {
-				return Optional.of(error(request, McpSchema.ErrorCodes.HEADER_MISMATCH,
+				return Optional.of(error(request, McpHttpBinding2026.HEADER_MISMATCH,
 						"Header mismatch: " + headerName + " header is required because the body carries a value",
 						null));
 			}
 			if (!matches(binding.primitiveType(), value.get(), decoded.get())) {
-				return Optional.of(error(request, McpSchema.ErrorCodes.HEADER_MISMATCH, "Header mismatch: " + headerName
+				return Optional.of(error(request, McpHttpBinding2026.HEADER_MISMATCH, "Header mismatch: " + headerName
 						+ " header value '" + decoded.get() + "' does not match body value '" + value.get() + "'",
 						null));
 			}
@@ -195,7 +194,8 @@ final class StatelessHttpBindingValidator {
 				McpSchema.METHOD_TOOLS_LIST, "mcp-http-binding-tools-list-" + page,
 				cursor == null ? null : Map.of("cursor", cursor));
 		return Mono
-			.defer(() -> this.handler.handle(new McpStatelessServerExchange(context, listRequest, Optional.empty())))
+			.defer(() -> this.handler
+				.handle(new McpStatelessStreamingServerHandler.Exchange(context, listRequest, Optional.empty())))
 			.flatMap(result -> {
 				if (!(result instanceof McpStatelessServerResult.Single single) || single.response().error() != null
 						|| single.response().result() == null) {
@@ -223,7 +223,7 @@ final class StatelessHttpBindingValidator {
 	}
 
 	private Mono<Optional<StatelessHttpResponse>> mismatch(McpSchema.JSONRPCRequest request, String detail) {
-		return reject(request, McpSchema.ErrorCodes.HEADER_MISMATCH, "Header mismatch: " + detail, null);
+		return reject(request, McpHttpBinding2026.HEADER_MISMATCH, "Header mismatch: " + detail, null);
 	}
 
 	private Mono<Optional<StatelessHttpResponse>> reject(McpSchema.JSONRPCRequest request, int code, String message,

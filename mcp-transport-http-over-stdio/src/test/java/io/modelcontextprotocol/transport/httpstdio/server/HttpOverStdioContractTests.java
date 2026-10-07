@@ -13,20 +13,19 @@ import java.util.concurrent.TimeUnit;
 import java.util.function.Consumer;
 import java.util.stream.Collectors;
 
-import io.modelcontextprotocol.client.transport.http.McpHttpHeaders;
-import io.modelcontextprotocol.client.transport.http.McpHttpRequest;
-import io.modelcontextprotocol.client.transport.http.McpHttpResponse;
+import java.net.http.HttpRequest;
+import java.net.http.HttpResponse;
+import java.nio.ByteBuffer;
+import java.util.concurrent.Flow;
+import io.modelcontextprotocol.transport.httpstdio.client.PipeRequests;
 import io.modelcontextprotocol.common.McpTransportContext;
 import io.modelcontextprotocol.json.McpJsonDefaults;
 import io.modelcontextprotocol.json.McpJsonMapper;
 import io.modelcontextprotocol.server.McpServer;
 import io.modelcontextprotocol.server.McpStatelessServerFeatures;
 import io.modelcontextprotocol.server.McpStatelessSyncServer;
-import io.modelcontextprotocol.server.transport.http.McpStatelessServerResult;
-import io.modelcontextprotocol.server.transport.http.McpStatelessStreamingServerHandler;
 import io.modelcontextprotocol.spec.McpSchema;
 import io.modelcontextprotocol.spec.ProtocolVersions;
-import io.modelcontextprotocol.spec.http.McpHeaderValueCodec;
 import io.modelcontextprotocol.transport.httpstdio.client.HttpOverStdioClientTransport;
 import io.modelcontextprotocol.transport.httpstdio.pipe.DuplexByteChannel;
 import io.modelcontextprotocol.transport.httpstdio.pipe.InMemoryDuplexByteChannel;
@@ -51,7 +50,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 @Timeout(60)
 class HttpOverStdioContractTests {
 
-	private static final String V = ProtocolVersions.MCP_2026_07_28;
+	private static final String V = McpHttpBinding2026.PROTOCOL_VERSION;
 
 	private static final McpJsonMapper JSON = McpJsonDefaults.getMapper();
 
@@ -182,7 +181,8 @@ class HttpOverStdioContractTests {
 						.JSONRPCMessage>map(i -> progress(request.id(), i))
 				.concatWithValues(McpSchema.JSONRPCResponse.result(request.id(), "ok"))));
 		});
-		McpHttpResponse victim = exchange(post(request("victim", "tools/call", Map.of("name", "t")), callHeaders("t")))
+		HttpResponse<Flow.Publisher<List<ByteBuffer>>> victim = exchange(
+				post(request("victim", "tools/call", Map.of("name", "t")), callHeaders("t")))
 			.block(Duration.ofSeconds(5));
 		Mono<String> sibling = exchange(post(request("sibling", "tools/call", Map.of("name", "t")), callHeaders("t")))
 			.flatMap(HttpOverStdioContractTests::body)
@@ -215,7 +215,7 @@ class HttpOverStdioContractTests {
 			}
 			return Mono.just(new McpStatelessServerResult.Single(McpSchema.JSONRPCResponse.result(request.id(), "ok")));
 		});
-		McpHttpResponse listen = exchange(
+		HttpResponse<Flow.Publisher<List<ByteBuffer>>> listen = exchange(
 				post(request("L1", "subscriptions/listen", Map.of()), headers("subscriptions/listen")))
 			.block(Duration.ofSeconds(5));
 		assertThat(listen.headers().firstValue("content-type")).contains("text/event-stream");
@@ -260,7 +260,7 @@ class HttpOverStdioContractTests {
 			return Mono.just(new McpStatelessServerResult.Accepted());
 		});
 		Map<String, String> headers = Map.of("Accept", "application/json, text/event-stream");
-		McpHttpResponse response = exchange(
+		HttpResponse<Flow.Publisher<List<ByteBuffer>>> response = exchange(
 				post("{\"jsonrpc\":\"2.0\",\"method\":\"notifications/initialized\"}", headers))
 			.block(Duration.ofSeconds(5));
 		assertThat(response.statusCode()).isEqualTo(202);
@@ -287,7 +287,8 @@ class HttpOverStdioContractTests {
 		Map<String, String> headers = new LinkedHashMap<>(headers("tools/list"));
 		headers.put("Mcp-Session-Id", "stale-session");
 		headers.put("Last-Event-ID", "42");
-		McpHttpResponse response = exchange(post(request("1", "tools/list", Map.of()), headers))
+		HttpResponse<Flow.Publisher<List<ByteBuffer>>> response = exchange(
+				post(request("1", "tools/list", Map.of()), headers))
 			.block(Duration.ofSeconds(5));
 		assertThat(response.statusCode()).isEqualTo(200);
 		assertThat(response.headers().firstValue("mcp-session-id")).as("no session minted or echoed").isEmpty();
@@ -299,7 +300,7 @@ class HttpOverStdioContractTests {
 		this.server.setStreamingHandler(exchange -> Mono.just(new McpStatelessServerResult.Single(
 				McpSchema.JSONRPCResponse.result(((McpSchema.JSONRPCRequest) exchange.message()).id(), "ok"))));
 		String huge = request("big", "tools/call", Map.of("name", "t", "arguments", Map.of("x", "y".repeat(4096))));
-		Mono<Integer> oversized = exchange(post(huge, callHeaders("t"))).map(McpHttpResponse::statusCode)
+		Mono<Integer> oversized = exchange(post(huge, callHeaders("t"))).map(HttpResponse::statusCode)
 			.onErrorReturn(-1);
 		assertThat(oversized.block(Duration.ofSeconds(10))).as("reset or 413, never accepted").isIn(-1, 413);
 		assertThat(statusOf(post(request("small", "tools/list", Map.of()), headers("tools/list")))).isEqualTo(200);
@@ -315,7 +316,8 @@ class HttpOverStdioContractTests {
 			.capabilities(McpSchema.ServerCapabilities.builder().tools(true).build())
 			.build();
 		try {
-			McpHttpResponse response = exchange(post(request("1", "nope/nope", Map.of()), headers("nope/nope")))
+			HttpResponse<Flow.Publisher<List<ByteBuffer>>> response = exchange(
+					post(request("1", "nope/nope", Map.of()), headers("nope/nope")))
 				.block(Duration.ofSeconds(5));
 			assertThat(response.statusCode()).isEqualTo(404);
 			assertThat(body(response).block(Duration.ofSeconds(5))).contains("\"code\":-32601");
@@ -332,7 +334,8 @@ class HttpOverStdioContractTests {
 		this.server.setStreamingHandler(exchange -> Mono.error(new AssertionError("handler must not run")));
 		Map<String, String> headers = new LinkedHashMap<>(headers("tools/list"));
 		headers.put("MCP-Protocol-Version", "2099-01-01");
-		McpHttpResponse response = exchange(post(request("1", "tools/list", Map.of(), "2099-01-01"), headers))
+		HttpResponse<Flow.Publisher<List<ByteBuffer>>> response = exchange(
+				post(request("1", "tools/list", Map.of(), "2099-01-01"), headers))
 			.block(Duration.ofSeconds(5));
 		assertThat(response.statusCode()).isEqualTo(400);
 		assertThat(body(response).block(Duration.ofSeconds(5))).contains("\"code\":-32022")
@@ -361,7 +364,8 @@ class HttpOverStdioContractTests {
 			Map<String, Object> args = Map.of("region", "us-west1", "query", "SELECT 1");
 			Map<String, String> good = new LinkedHashMap<>(callHeaders("execute_sql"));
 			good.put("Mcp-Param-Region", "us-west1");
-			McpHttpResponse ok = exchange(post(call("1", "execute_sql", args), good)).block(Duration.ofSeconds(5));
+			HttpResponse<Flow.Publisher<List<ByteBuffer>>> ok = exchange(post(call("1", "execute_sql", args), good))
+				.block(Duration.ofSeconds(5));
 			assertThat(ok.statusCode()).isEqualTo(200);
 			assertThat(body(ok).block(Duration.ofSeconds(5))).contains("called execute_sql");
 
@@ -370,7 +374,8 @@ class HttpOverStdioContractTests {
 				.isEqualTo(400);
 			Map<String, String> wrong = new LinkedHashMap<>(callHeaders("execute_sql"));
 			wrong.put("mcp-param-region", "us-east1");
-			McpHttpResponse mismatch = exchange(post(call("3", "execute_sql", args), wrong))
+			HttpResponse<Flow.Publisher<List<ByteBuffer>>> mismatch = exchange(
+					post(call("3", "execute_sql", args), wrong))
 				.block(Duration.ofSeconds(5));
 			assertThat(mismatch.statusCode()).isEqualTo(400);
 			assertThat(body(mismatch).block(Duration.ofSeconds(5))).contains("\"code\":-32020")
@@ -404,7 +409,8 @@ class HttpOverStdioContractTests {
 			Map<String, String> headers = new LinkedHashMap<>(headers("resources/read"));
 			headers.put("Mcp-Name", McpHeaderValueCodec.encode(uri));
 			assertThat(headers.get("Mcp-Name")).startsWith("=?base64?");
-			McpHttpResponse response = exchange(post(request("1", "resources/read", Map.of("uri", uri)), headers))
+			HttpResponse<Flow.Publisher<List<ByteBuffer>>> response = exchange(
+					post(request("1", "resources/read", Map.of("uri", uri)), headers))
 				.block(Duration.ofSeconds(5));
 			assertThat(response.statusCode()).isEqualTo(200);
 			assertThat(body(response).block(Duration.ofSeconds(5))).contains("read " + uri);
@@ -455,24 +461,22 @@ class HttpOverStdioContractTests {
 			.build();
 	}
 
-	private Mono<McpHttpResponse> exchange(McpHttpRequest request) {
-		return this.client.exchange().exchange(request, McpTransportContext.EMPTY);
+	private Mono<HttpResponse<Flow.Publisher<List<ByteBuffer>>>> exchange(HttpRequest request) {
+		return PipeRequests.send(this.client.httpClient(), request);
 	}
 
-	private int statusOf(McpHttpRequest request) {
-		McpHttpResponse response = exchange(request).block(Duration.ofSeconds(10));
+	private int statusOf(HttpRequest request) {
+		HttpResponse<Flow.Publisher<List<ByteBuffer>>> response = exchange(request).block(Duration.ofSeconds(10));
 		body(response).block(Duration.ofSeconds(10));
 		return response.statusCode();
 	}
 
-	private static Flux<String> text(McpHttpResponse response) {
-		return JdkFlowAdapter.flowPublisherToFlux(response.body())
-			.flatMapIterable(values -> values)
-			.map(buffer -> StandardCharsets.UTF_8.decode(buffer).toString());
+	private static Flux<String> text(HttpResponse<Flow.Publisher<List<ByteBuffer>>> response) {
+		return PipeRequests.text(response);
 	}
 
-	private static Mono<String> body(McpHttpResponse response) {
-		return text(response).collect(Collectors.joining());
+	private static Mono<String> body(HttpResponse<Flow.Publisher<List<ByteBuffer>>> response) {
+		return PipeRequests.body(response);
 	}
 
 	private static int indexOfLineContaining(List<String> lines, String fragment) {
@@ -534,15 +538,8 @@ class HttpOverStdioContractTests {
 		return headers;
 	}
 
-	private static McpHttpRequest post(String body, Map<String, String> headers) {
-		McpHttpHeaders.Builder values = McpHttpHeaders.builder();
-		headers.forEach(values::add);
-		return McpHttpRequest.builder()
-			.method("POST")
-			.uri(URI.create("http://pipe/mcp"))
-			.headers(values.build())
-			.body(body)
-			.build();
+	private static HttpRequest post(String body, Map<String, String> headers) {
+		return PipeRequests.request("POST", "http://pipe/mcp", headers, body);
 	}
 
 }

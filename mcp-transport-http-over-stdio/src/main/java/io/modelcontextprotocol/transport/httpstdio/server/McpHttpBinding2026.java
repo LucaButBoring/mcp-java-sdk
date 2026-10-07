@@ -1,4 +1,4 @@
-package io.modelcontextprotocol.server.transport.http;
+package io.modelcontextprotocol.transport.httpstdio.server;
 
 import java.util.List;
 import java.util.Objects;
@@ -30,6 +30,24 @@ import reactor.core.publisher.Mono;
  */
 public final class McpHttpBinding2026 {
 
+	/** The MCP protocol version this binding implements. */
+	public static final String PROTOCOL_VERSION = "2026-07-28";
+
+	/** Declares the JSON-RPC method carried by the request body. */
+	public static final String MCP_METHOD = "Mcp-Method";
+
+	/** Declares the named MCP target carried by the request body. */
+	public static final String MCP_NAME = "Mcp-Name";
+
+	/** Prefix for tool parameter binding headers. */
+	public static final String MCP_PARAM_PREFIX = "Mcp-Param-";
+
+	/** A required binding header is missing, malformed, or disagrees with the body. */
+	public static final int HEADER_MISMATCH = -32020;
+
+	/** The request declares an unsupported MCP protocol version. */
+	public static final int UNSUPPORTED_PROTOCOL_VERSION = -32022;
+
 	private final List<String> supportedVersions;
 
 	private final ToolResolver toolResolver;
@@ -53,7 +71,7 @@ public final class McpHttpBinding2026 {
 
 	public static final class Builder {
 
-		private List<String> supportedVersions = List.of(ProtocolVersions.MCP_2026_07_28);
+		private List<String> supportedVersions = List.of(PROTOCOL_VERSION);
 
 		private ToolResolver toolResolver;
 

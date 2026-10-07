@@ -2,12 +2,13 @@
  * Copyright 2026-2026 the original author or authors.
  */
 
-package io.modelcontextprotocol.server.transport.http;
+package io.modelcontextprotocol.transport.httpstdio.server;
 
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Optional;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.function.BooleanSupplier;
@@ -18,17 +19,18 @@ import io.modelcontextprotocol.server.transport.HeaderAccessor;
 import io.modelcontextprotocol.server.transport.ServerHttpHeaderValidator;
 import io.modelcontextprotocol.server.transport.ServerTransportSecurityException;
 import io.modelcontextprotocol.spec.HttpHeaders;
-import io.modelcontextprotocol.spec.McpError;
 import io.modelcontextprotocol.spec.McpSchema;
 import io.modelcontextprotocol.util.Assert;
 import reactor.core.publisher.Flux;
 import reactor.core.publisher.Mono;
 
 /**
- * Container-neutral, nonblocking dispatcher for stateless Streamable HTTP front ends.
- * GET, DELETE, and all other non-POST methods are rejected with HTTP 405.
+ * Nonblocking stateless Streamable HTTP dispatch for one MCP endpoint request: HTTP
+ * preflight, the optional 2026-07-28 header binding, handler invocation, and validation
+ * of the handler's result. GET, DELETE, and all other non-POST methods are rejected with
+ * HTTP 405.
  */
-public final class StatelessHttpDispatcher {
+final class StatelessHttpDispatcher {
 
 	private static final Map<String, List<String>> NO_HEADERS = Map.of();
 
@@ -105,7 +107,7 @@ public final class StatelessHttpDispatcher {
 	 * @param request neutral HTTP request
 	 * @return the response
 	 */
-	public Mono<StatelessHttpResponse> dispatch(StatelessHttpRequest request) {
+	public Mono<StatelessHttpResponse> dispatch(Request request) {
 		return Mono.defer(() -> dispatchNow(request));
 	}
 
@@ -144,7 +146,7 @@ public final class StatelessHttpDispatcher {
 				() -> handleNow(body, transportContext, firstHeader(headers, HttpHeaders.PROTOCOL_VERSION), headers));
 	}
 
-	private Mono<StatelessHttpResponse> dispatchNow(StatelessHttpRequest request) {
+	private Mono<StatelessHttpResponse> dispatchNow(Request request) {
 		if (!"POST".equalsIgnoreCase(request.method())) {
 			return Mono.just(empty(405));
 		}
@@ -196,8 +198,8 @@ public final class StatelessHttpDispatcher {
 
 	private Mono<StatelessHttpResponse> invoke(McpSchema.JSONRPCMessage message, McpTransportContext transportContext,
 			Optional<String> protocolVersionHeader) {
-		McpStatelessServerExchange exchange = new McpStatelessServerExchange(transportContext, message,
-				protocolVersionHeader);
+		McpStatelessStreamingServerHandler.Exchange exchange = new McpStatelessStreamingServerHandler.Exchange(
+				transportContext, message, protocolVersionHeader);
 		String kind = message instanceof McpSchema.JSONRPCNotification ? "notification" : "request";
 		return Mono.defer(() -> {
 			Mono<McpStatelessServerResult> result = this.handler.handle(exchange);
@@ -205,7 +207,7 @@ public final class StatelessHttpDispatcher {
 		})
 			.switchIfEmpty(Mono.error(new NullPointerException("handler completed without a result")))
 			.flatMap(result -> mapResult(message, result))
-			.onErrorResume(McpStatelessContractException.class,
+			.onErrorResume(ContractViolation.class,
 					exception -> exception.isHandlerViolation() ? handlerError(kind, exception.getMessage())
 							: error(400, McpSchema.ErrorCodes.INVALID_REQUEST, exception.getMessage()))
 			.onErrorResume(exception -> handlerError(kind, exception.getMessage()));
@@ -246,10 +248,10 @@ public final class StatelessHttpDispatcher {
 				new StatelessHttpResponse.Sse(validatedEvents(stream), stream.longLived())));
 	}
 
-	private Flux<SseEvent> validatedEvents(McpStatelessServerResult.Stream stream) {
+	private Flux<StatelessHttpResponse.SseEvent> validatedEvents(McpStatelessServerResult.Stream stream) {
 		return Flux.defer(() -> {
 			AtomicBoolean responseEmitted = new AtomicBoolean();
-			Flux<SseEvent> events = stream.messages().handle((message, sink) -> {
+			Flux<StatelessHttpResponse.SseEvent> events = stream.messages().handle((message, sink) -> {
 				if (message instanceof McpSchema.JSONRPCRequest) {
 					sink.error(handlerViolation("A stateless response stream must not emit a JSON-RPC request"));
 					return;
@@ -268,7 +270,8 @@ public final class StatelessHttpDispatcher {
 					responseEmitted.set(true);
 				}
 				try {
-					sink.next(new SseEvent(Optional.empty(), "message", this.jsonMapper.writeValueAsString(message)));
+					sink.next(new StatelessHttpResponse.SseEvent(Optional.empty(), "message",
+							this.jsonMapper.writeValueAsString(message)));
 				}
 				catch (IOException exception) {
 					sink.error(exception);
@@ -281,22 +284,22 @@ public final class StatelessHttpDispatcher {
 		});
 	}
 
-	private static McpStatelessContractException handlerViolation(String message) {
-		return new McpStatelessContractException(McpSchema.ErrorCodes.INTERNAL_ERROR, message,
-				McpStatelessContractException.Origin.HANDLER);
+	private static ContractViolation handlerViolation(String message) {
+		return new ContractViolation(McpSchema.ErrorCodes.INTERNAL_ERROR, message, true);
 	}
 
 	private Mono<StatelessHttpResponse> handlerError(String kind, String message) {
 		return error(500, McpSchema.ErrorCodes.INTERNAL_ERROR, "Failed to handle " + kind + ": " + message);
 	}
 
-	private Optional<String> firstHeader(StatelessHttpRequest request, String name) {
+	private Optional<String> firstHeader(Request request, String name) {
 		return request.headers().getHeader(name).stream().findFirst();
 	}
 
 	private Mono<StatelessHttpResponse> error(int status, int code, String message) {
 		try {
-			McpError error = McpError.builder(code).message(message).build();
+			McpSchema.JSONRPCResponse.JSONRPCError error = new McpSchema.JSONRPCResponse.JSONRPCError(code, message,
+					null);
 			return Mono.just(new StatelessHttpResponse(status, JSON_HEADERS,
 					new StatelessHttpResponse.Json(this.jsonMapper.writeValueAsString(error))));
 		}
@@ -311,6 +314,54 @@ public final class StatelessHttpDispatcher {
 
 	private static StatelessHttpResponse text(int status, String message) {
 		return new StatelessHttpResponse(status, NO_HEADERS, new StatelessHttpResponse.Json(message));
+	}
+
+	/**
+	 * HTTP input for one dispatch. The body has already been read and decoded; the
+	 * dispatcher enforces the size limit against its UTF-8 representation.
+	 */
+	record Request(String method, String path, HeaderAccessor headers, Optional<Long> contentLength, String body,
+			McpTransportContext transportContext) {
+
+		Request {
+			Objects.requireNonNull(method, "method must not be null");
+			Objects.requireNonNull(path, "path must not be null");
+			Objects.requireNonNull(headers, "headers must not be null");
+			Objects.requireNonNull(contentLength, "contentLength must not be null");
+			Objects.requireNonNull(body, "body must not be null");
+			Objects.requireNonNull(transportContext, "transportContext must not be null");
+		}
+
+	}
+
+	/**
+	 * A message-contract violation. Client violations answer HTTP 400; handler violations
+	 * answer 500 before headers are committed, or fail a started SSE stream.
+	 */
+	static final class ContractViolation extends RuntimeException {
+
+		private final int code;
+
+		private final boolean handler;
+
+		ContractViolation(int code, String message) {
+			this(code, message, false);
+		}
+
+		ContractViolation(int code, String message, boolean handler) {
+			super(message);
+			this.code = code;
+			this.handler = handler;
+		}
+
+		int getCode() {
+			return this.code;
+		}
+
+		boolean isHandlerViolation() {
+			return this.handler;
+		}
+
 	}
 
 }

@@ -2,11 +2,12 @@
  * Copyright 2026-2026 the original author or authors.
  */
 
-package io.modelcontextprotocol.server.transport.http;
+package io.modelcontextprotocol.transport.httpstdio.server;
 
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
+import java.util.Optional;
 
 import reactor.core.publisher.Flux;
 
@@ -50,15 +51,33 @@ public record StatelessHttpResponse(int status, Map<String, List<String>> header
 	 *
 	 * @param events ordered events
 	 */
-	public record Sse(Flux<SseEvent> events, boolean longLived) implements Body {
+	public record Sse(Flux<StatelessHttpResponse.SseEvent> events, boolean longLived) implements Body {
 
-		public Sse(Flux<SseEvent> events) {
+		public Sse(Flux<StatelessHttpResponse.SseEvent> events) {
 			this(events, false);
 		}
 
 		public Sse {
 			Objects.requireNonNull(events, "events must not be null");
 		}
+	}
+
+	/**
+	 * One Server-Sent Event, encoded as an optional {@code id: } line, an {@code event: }
+	 * line, a {@code data: } line, and a terminating blank line.
+	 *
+	 * @param id optional event identifier
+	 * @param event event type
+	 * @param data serialized event data
+	 */
+	public record SseEvent(Optional<String> id, String event, String data) {
+
+		public SseEvent {
+			Objects.requireNonNull(id, "id must not be null");
+			Objects.requireNonNull(event, "event must not be null");
+			Objects.requireNonNull(data, "data must not be null");
+		}
+
 	}
 
 }

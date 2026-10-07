@@ -2,7 +2,7 @@
  * Copyright 2026-2026 the original author or authors.
  */
 
-package io.modelcontextprotocol.server.transport.http;
+package io.modelcontextprotocol.transport.httpstdio.server;
 
 import java.util.ArrayList;
 import java.util.HashMap;
@@ -32,9 +32,9 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
  */
 class StatelessHttpBindingTests {
 
-	private static final McpJsonMapper JSON_MAPPER = new TestMcpJsonMapper();
+	private static final McpJsonMapper JSON_MAPPER = io.modelcontextprotocol.json.McpJsonDefaults.getMapper();
 
-	private static final String V = ProtocolVersions.MCP_2026_07_28;
+	private static final String V = McpHttpBinding2026.PROTOCOL_VERSION;
 
 	private static final McpSchema.Tool SQL_TOOL = McpSchema.Tool
 		.builder("execute_sql",
@@ -83,7 +83,7 @@ class StatelessHttpBindingTests {
 		headers.put("MCP-Protocol-Version", List.of("2099-01-01"));
 		StatelessHttpResponse response = dispatch(request("tools/list", Map.of(), "2099-01-01"), headers);
 		McpSchema.JSONRPCResponse.JSONRPCError error = error(response, 400);
-		assertThat(error.code()).isEqualTo(McpSchema.ErrorCodes.UNSUPPORTED_PROTOCOL_VERSION);
+		assertThat(error.code()).isEqualTo(McpHttpBinding2026.UNSUPPORTED_PROTOCOL_VERSION);
 		assertThat(error.data()).isEqualTo(Map.of("supported", List.of(V), "requested", "2099-01-01"));
 		assertThat(this.handled).isEmpty();
 	}
@@ -348,15 +348,15 @@ class StatelessHttpBindingTests {
 		return headers;
 	}
 
-	private static StatelessHttpRequest httpRequest(McpSchema.JSONRPCMessage message,
+	private static StatelessHttpDispatcher.Request httpRequest(McpSchema.JSONRPCMessage message,
 			Map<String, List<String>> headers) {
 		return httpRequest(message, headers, McpTransportContext.EMPTY);
 	}
 
-	private static StatelessHttpRequest httpRequest(McpSchema.JSONRPCMessage message, Map<String, List<String>> headers,
-			McpTransportContext context) {
+	private static StatelessHttpDispatcher.Request httpRequest(McpSchema.JSONRPCMessage message,
+			Map<String, List<String>> headers, McpTransportContext context) {
 		try {
-			return new StatelessHttpRequest("POST", "/mcp", new Headers(headers), Optional.empty(),
+			return new StatelessHttpDispatcher.Request("POST", "/mcp", new Headers(headers), Optional.empty(),
 					JSON_MAPPER.writeValueAsString(message), context);
 		}
 		catch (Exception exception) {
@@ -380,7 +380,7 @@ class StatelessHttpBindingTests {
 
 	private void assertMismatch(StatelessHttpResponse response, String messageFragment) {
 		McpSchema.JSONRPCResponse.JSONRPCError error = error(response, 400);
-		assertThat(error.code()).isEqualTo(McpSchema.ErrorCodes.HEADER_MISMATCH);
+		assertThat(error.code()).isEqualTo(McpHttpBinding2026.HEADER_MISMATCH);
 		assertThat(error.message()).startsWith("Header mismatch: ").contains(messageFragment);
 		assertThat(this.handled).as("handler must not run for a rejected request").isEmpty();
 	}

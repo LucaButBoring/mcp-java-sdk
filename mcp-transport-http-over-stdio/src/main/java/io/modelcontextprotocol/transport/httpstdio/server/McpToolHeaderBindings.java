@@ -2,7 +2,7 @@
  * Copyright 2026-2026 the original author or authors.
  */
 
-package io.modelcontextprotocol.spec.http;
+package io.modelcontextprotocol.transport.httpstdio.server;
 
 import java.util.ArrayList;
 import java.util.HashSet;

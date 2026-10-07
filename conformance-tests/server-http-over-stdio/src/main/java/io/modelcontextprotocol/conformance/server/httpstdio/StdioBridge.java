@@ -9,6 +9,9 @@ import java.io.OutputStream;
 import java.net.InetAddress;
 import java.net.InetSocketAddress;
 import java.net.URI;
+import java.net.http.HttpRequest;
+import java.net.http.HttpResponse;
+import java.util.concurrent.Flow;
 import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
@@ -22,10 +25,6 @@ import java.util.concurrent.TimeUnit;
 
 import com.sun.net.httpserver.HttpExchange;
 import com.sun.net.httpserver.HttpServer;
-import io.modelcontextprotocol.client.transport.http.McpHttpHeaders;
-import io.modelcontextprotocol.client.transport.http.McpHttpRequest;
-import io.modelcontextprotocol.client.transport.http.McpHttpResponse;
-import io.modelcontextprotocol.common.McpTransportContext;
 import io.modelcontextprotocol.transport.httpstdio.client.HttpOverStdioClientTransport;
 import reactor.adapter.JdkFlowAdapter;
 import reactor.core.publisher.Flux;
@@ -55,7 +54,9 @@ public final class StdioBridge {
 
 	/** Hop-by-hop and connection-specific headers that HTTP/2 must not carry. */
 	private static final Set<String> HOP_BY_HOP = Set.of("host", "connection", "keep-alive", "proxy-connection",
-			"transfer-encoding", "upgrade", "te", "trailer", "content-length");
+			"transfer-encoding", "upgrade", "te", "trailer", "content-length",
+			// Restricted by java.net.http and meaningless over the pipe.
+			"expect");
 
 	private StdioBridge() {
 	}
@@ -117,23 +118,17 @@ public final class StdioBridge {
 			URI target = URI
 				.create("http://" + (host == null ? "127.0.0.1:" + port : host) + exchange.getRequestURI().toString());
 			Set<String> dropped = droppedHeaders(exchange.getRequestHeaders());
-			McpHttpHeaders.Builder headers = McpHttpHeaders.builder();
+			byte[] body = exchange.getRequestBody().readAllBytes();
+			HttpRequest.Builder request = HttpRequest.newBuilder(target)
+				.method(exchange.getRequestMethod(), body.length == 0 ? HttpRequest.BodyPublishers.noBody()
+						: HttpRequest.BodyPublishers.ofByteArray(body));
 			exchange.getRequestHeaders().forEach((name, values) -> {
 				if (!dropped.contains(name.toLowerCase(Locale.ROOT))) {
-					values.forEach(value -> headers.add(name, value));
+					values.forEach(value -> request.header(name, value));
 				}
 			});
-			byte[] body = exchange.getRequestBody().readAllBytes();
-			McpHttpRequest.Builder request = McpHttpRequest.builder()
-				.method(exchange.getRequestMethod())
-				.uri(target)
-				.headers(headers.build());
-			if (body.length > 0) {
-				request.body(new String(body, StandardCharsets.UTF_8));
-			}
-			McpHttpResponse response = child.exchange()
-				.exchange(request.build(), McpTransportContext.EMPTY)
-				.block(Duration.ofSeconds(60));
+			HttpResponse<Flow.Publisher<List<ByteBuffer>>> response = child.httpClient()
+				.send(request.build(), HttpResponse.BodyHandlers.ofPublisher());
 			respond(exchange, response);
 		}
 		catch (Exception failure) {
@@ -176,7 +171,8 @@ public final class StdioBridge {
 		return dropped;
 	}
 
-	private static void respond(HttpExchange exchange, McpHttpResponse response) throws IOException {
+	private static void respond(HttpExchange exchange, HttpResponse<Flow.Publisher<List<ByteBuffer>>> response)
+			throws IOException {
 		Set<String> dropped = droppedHeaders(response.headers().map());
 		response.headers().map().forEach((name, values) -> {
 			if (!dropped.contains(name.toLowerCase(Locale.ROOT))) {

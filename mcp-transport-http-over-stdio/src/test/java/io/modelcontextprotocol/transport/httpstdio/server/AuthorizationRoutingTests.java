@@ -1,6 +1,8 @@
 package io.modelcontextprotocol.transport.httpstdio.server;
 
-import java.net.URI;
+import java.net.http.HttpClient;
+import java.net.http.HttpRequest;
+import java.net.http.HttpResponse;
 import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
@@ -8,6 +10,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.concurrent.Flow;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
@@ -18,20 +21,17 @@ import java.util.stream.Collectors;
 import io.modelcontextprotocol.client.McpClient;
 import io.modelcontextprotocol.client.McpSyncClient;
 import io.modelcontextprotocol.client.transport.HttpClientStreamableHttpTransport;
-import io.modelcontextprotocol.client.transport.http.McpHttpExchange;
-import io.modelcontextprotocol.client.transport.http.McpHttpHeaders;
-import io.modelcontextprotocol.client.transport.http.McpHttpRequest;
-import io.modelcontextprotocol.client.transport.http.McpHttpResponse;
 import io.modelcontextprotocol.common.McpTransportContext;
 import io.modelcontextprotocol.json.McpJsonDefaults;
 import io.modelcontextprotocol.json.TypeRef;
 import io.modelcontextprotocol.server.McpServer;
 import io.modelcontextprotocol.server.McpStatelessServerFeatures;
 import io.modelcontextprotocol.server.McpStatelessSyncServer;
-import io.modelcontextprotocol.server.transport.http.StatelessHttpResponse;
 import io.modelcontextprotocol.spec.McpSchema;
 import io.modelcontextprotocol.transport.httpstdio.client.HttpOverStdioClientTransport;
-import io.modelcontextprotocol.transport.httpstdio.client.LogicalAuthorityRoutingExchange;
+import io.modelcontextprotocol.transport.httpstdio.client.LogicalAuthorityRoutingHttpClient;
+import io.modelcontextprotocol.transport.httpstdio.client.PipeRequests;
+import io.modelcontextprotocol.transport.httpstdio.client.StubHttpClient;
 import io.modelcontextprotocol.transport.httpstdio.http2.Http2Request;
 import io.modelcontextprotocol.transport.httpstdio.pipe.DuplexByteChannel;
 import io.modelcontextprotocol.transport.httpstdio.pipe.InMemoryDuplexByteChannel;
@@ -49,10 +49,10 @@ import static org.assertj.core.api.Assertions.assertThat;
 
 /**
  * Phase 5: a host OAuth layer authorizes against a child resource server through
- * {@link LogicalAuthorityRoutingExchange}. The child's authority, {@code child.invalid},
- * cannot resolve in DNS (RFC 6761), so any attempt to reach it through the network would
- * fail; the authorization server, {@code idp.example}, exists only as a fake network
- * exchange that records every request it sees.
+ * {@link LogicalAuthorityRoutingHttpClient}. The child's authority,
+ * {@code child.invalid}, cannot resolve in DNS (RFC 6761), so any attempt to reach it
+ * through the network would fail; the authorization server, {@code idp.example}, exists
+ * only as a fake network client that records every request it sees.
  */
 @Timeout(60)
 class AuthorizationRoutingTests {
@@ -68,9 +68,9 @@ class AuthorizationRoutingTests {
 
 	private static final String TOKEN = "child-scoped-token";
 
-	private final List<McpHttpRequest> pipeRequests = new CopyOnWriteArrayList<>();
+	private final List<HttpRequest> pipeRequests = new CopyOnWriteArrayList<>();
 
-	private final List<McpHttpRequest> networkRequests = new CopyOnWriteArrayList<>();
+	private final List<HttpRequest> networkRequests = new CopyOnWriteArrayList<>();
 
 	private DefaultEventLoopGroup serverGroup;
 
@@ -96,14 +96,18 @@ class AuthorizationRoutingTests {
 		startChild(true);
 		AtomicReference<String> token = new AtomicReference<>();
 		AtomicInteger challenges = new AtomicInteger();
-		LogicalAuthorityRoutingExchange routing = LogicalAuthorityRoutingExchange.builder(fakeIdentityProvider())
-			.route(ORIGIN, recording(this.client.exchange(), this.pipeRequests))
+		LogicalAuthorityRoutingHttpClient routing = LogicalAuthorityRoutingHttpClient
+			.builder(StubHttpClient.recording(fakeIdentityProvider(), this.networkRequests::add))
+			.route(ORIGIN, StubHttpClient.recording(this.client.httpClient(), this.pipeRequests::add))
 			.build();
-		McpHttpExchange authorizing = (request, context) -> routing.exchange(
-				token.get() == null ? request : withHeader(request, "Authorization", "Bearer " + token.get()), context);
 		HttpClientStreamableHttpTransport transport = HttpClientStreamableHttpTransport.builder(ORIGIN)
 			.endpoint("/mcp")
-			.httpExchange(authorizing)
+			.clientBuilder(routing.asClientBuilder())
+			.httpRequestCustomizer((builder, method, uri, body, context) -> {
+				if (token.get() != null) {
+					builder.header("Authorization", "Bearer " + token.get());
+				}
+			})
 			.authorizationErrorHandler((snapshot, info, context) -> {
 				challenges.incrementAndGet();
 				String challenge = info.headers().firstValue("www-authenticate").orElseThrow();
@@ -140,70 +144,58 @@ class AuthorizationRoutingTests {
 	@Test
 	void metadataIsServedForTheAuthorityTheHostRequestedAndOnlyAtThePathAwareLocation() throws Exception {
 		startChild(true);
-		McpHttpResponse metadata = this.client.exchange()
-			.exchange(get(METADATA_URL), McpTransportContext.EMPTY)
-			.block(Duration.ofSeconds(5));
+		HttpResponse<Flow.Publisher<List<ByteBuffer>>> metadata = PipeRequests.sendNow(this.client.httpClient(),
+				get(METADATA_URL));
 		assertThat(metadata.statusCode()).isEqualTo(200);
 		Map<String, Object> document = json(metadata).block(Duration.ofSeconds(5));
 		assertThat(document.get("resource")).as("RFC 9728 3.3: identical to the identifier the URL was built from")
 			.isEqualTo(RESOURCE);
 
-		McpHttpResponse root = this.client.exchange()
-			.exchange(get(ORIGIN + "/.well-known/oauth-protected-resource"), McpTransportContext.EMPTY)
-			.block(Duration.ofSeconds(5));
+		HttpResponse<Flow.Publisher<List<ByteBuffer>>> root = PipeRequests.sendNow(this.client.httpClient(),
+				get(ORIGIN + "/.well-known/oauth-protected-resource"));
 		assertThat(root.statusCode()).as("the resource is /mcp, so the root location is not served").isEqualTo(404);
 
-		McpHttpResponse otherAuthority = this.client.exchange()
-			.exchange(get("https://elsewhere.invalid:8443/.well-known/oauth-protected-resource/mcp"),
-					McpTransportContext.EMPTY)
-			.block(Duration.ofSeconds(5));
+		HttpResponse<Flow.Publisher<List<ByteBuffer>>> otherAuthority = PipeRequests.sendNow(this.client.httpClient(),
+				get("https://elsewhere.invalid:8443/.well-known/oauth-protected-resource/mcp"));
 		assertThat(otherAuthority.statusCode()).as("the child serves only its configured authority").isEqualTo(421);
 	}
 
 	@Test
 	void aProtectedEndpointChallengesBeforeAnyHandlerIsInstalled() throws Exception {
 		startChild(false);
-		McpHttpRequest unauthenticated = McpHttpRequest.builder()
-			.method("POST")
-			.uri(URI.create(RESOURCE))
-			.headers(McpHttpHeaders.builder().add("Content-Type", "application/json").build())
-			.body("{}")
-			.build();
-		McpHttpResponse challenged = this.client.exchange()
-			.exchange(unauthenticated, McpTransportContext.EMPTY)
-			.block(Duration.ofSeconds(5));
+		HttpRequest unauthenticated = PipeRequests.request("POST", RESOURCE, Map.of("Content-Type", "application/json"),
+				"{}");
+		HttpResponse<Flow.Publisher<List<ByteBuffer>>> challenged = PipeRequests.sendNow(this.client.httpClient(),
+				unauthenticated);
 		assertThat(challenged.statusCode()).isEqualTo(401);
 		assertThat(challenged.headers().firstValue("www-authenticate"))
 			.hasValue("Bearer resource_metadata=\"" + METADATA_URL + "\"");
 
-		McpHttpResponse notReady = this.client.exchange()
-			.exchange(withHeader(unauthenticated, "Authorization", "Bearer " + TOKEN), McpTransportContext.EMPTY)
-			.block(Duration.ofSeconds(5));
+		HttpResponse<Flow.Publisher<List<ByteBuffer>>> notReady = PipeRequests.sendNow(this.client.httpClient(),
+				PipeRequests.request("POST", RESOURCE,
+						Map.of("Content-Type", "application/json", "Authorization", "Bearer " + TOKEN), "{}"));
 		assertThat(notReady.statusCode()).as("authorized, but no handler yet").isEqualTo(503);
 	}
 
 	/** RFC 9728 section 5: challenge-directed discovery, then exact resource equality. */
-	private Mono<String> discoverAndObtainToken(LogicalAuthorityRoutingExchange routing, String challenge) {
+	private Mono<String> discoverAndObtainToken(HttpClient routing, String challenge) {
 		Matcher matcher = Pattern.compile("resource_metadata=\"([^\"]+)\"").matcher(challenge);
 		assertThat(matcher.find()).as("challenge names its metadata: " + challenge).isTrue();
 		String metadataUrl = matcher.group(1);
 		assertThat(metadataUrl).isEqualTo(METADATA_URL);
-		return routing.exchange(get(metadataUrl), McpTransportContext.EMPTY)
+		return PipeRequests.send(routing, get(metadataUrl))
 			.flatMap(AuthorizationRoutingTests::json)
 			.flatMap(metadata -> {
 				assertThat(metadata.get("resource")).isEqualTo(RESOURCE);
 				@SuppressWarnings("unchecked")
 				String issuer = ((List<String>) metadata.get("authorization_servers")).get(0);
-				return routing.exchange(get(issuer + "/.well-known/oauth-authorization-server"),
-						McpTransportContext.EMPTY);
+				return PipeRequests.send(routing, get(issuer + "/.well-known/oauth-authorization-server"));
 			})
 			.flatMap(AuthorizationRoutingTests::json)
-			.flatMap(serverMetadata -> routing.exchange(McpHttpRequest.builder()
-				.method("POST")
-				.uri(URI.create((String) serverMetadata.get("token_endpoint")))
-				.headers(McpHttpHeaders.builder().add("Content-Type", "application/x-www-form-urlencoded").build())
-				.body("grant_type=client_credentials&resource=" + RESOURCE)
-				.build(), McpTransportContext.EMPTY))
+			.flatMap(serverMetadata -> PipeRequests.send(routing,
+					PipeRequests.request("POST", (String) serverMetadata.get("token_endpoint"),
+							Map.of("Content-Type", "application/x-www-form-urlencoded"),
+							"grant_type=client_credentials&resource=" + RESOURCE)))
 			.flatMap(AuthorizationRoutingTests::json)
 			.map(response -> (String) response.get("access_token"));
 	}
@@ -269,71 +261,40 @@ class AuthorizationRoutingTests {
 				new StatelessHttpResponse.Empty()));
 	}
 
-	private McpHttpExchange fakeIdentityProvider() {
-		return (request, context) -> {
-			this.networkRequests.add(request);
+	private static HttpClient fakeIdentityProvider() {
+		return new StubHttpClient(request -> {
 			String path = request.uri().getPath();
 			if (!"idp.example".equals(request.uri().getHost())) {
-				return Mono.error(new IllegalStateException("network saw an unexpected host: " + request.uri()));
+				throw new IllegalStateException("network saw an unexpected host: " + request.uri());
 			}
 			if ("/.well-known/oauth-authorization-server".equals(path)) {
-				return Mono.just(
-						jsonResponse(request, "{\"issuer\":\"" + IDP + "\",\"token_endpoint\":\"" + IDP + "/token\"}"));
+				return StubHttpClient.Reply.of(200,
+						"{\"issuer\":\"" + IDP + "\",\"token_endpoint\":\"" + IDP + "/token\"}", "Content-Type",
+						"application/json");
 			}
 			if ("/token".equals(path)) {
-				return Mono
-					.just(jsonResponse(request, "{\"access_token\":\"" + TOKEN + "\",\"token_type\":\"Bearer\"}"));
+				return StubHttpClient.Reply.of(200, "{\"access_token\":\"" + TOKEN + "\",\"token_type\":\"Bearer\"}",
+						"Content-Type", "application/json");
 			}
-			return Mono.error(new IllegalStateException("unexpected identity-provider request: " + request.uri()));
-		};
+			throw new IllegalStateException("unexpected identity-provider request: " + request.uri());
+		});
 	}
 
-	private static McpHttpExchange recording(McpHttpExchange delegate, List<McpHttpRequest> seen) {
-		return (request, context) -> {
-			seen.add(request);
-			return delegate.exchange(request, context);
-		};
-	}
-
-	private static McpHttpRequest withHeader(McpHttpRequest request, String name, String value) {
-		McpHttpRequest.Builder builder = McpHttpRequest.builder()
-			.method(request.method())
-			.uri(request.uri())
-			.headers(McpHttpHeaders.builder().addAll(request.headers().map()).add(name, value).build());
-		request.body().ifPresent(builder::body);
-		return builder.build();
-	}
-
-	private static McpHttpRequest get(String url) {
-		return McpHttpRequest.builder()
-			.method("GET")
-			.uri(URI.create(url))
-			.headers(McpHttpHeaders.builder().build())
-			.build();
-	}
-
-	private static McpHttpResponse jsonResponse(McpHttpRequest request, String body) {
-		return new McpHttpResponse(200, McpHttpHeaders.builder().add("Content-Type", "application/json").build(),
-				JdkFlowAdapter.publisherToFlowPublisher(
-						Flux.just(List.of(ByteBuffer.wrap(body.getBytes(StandardCharsets.UTF_8))))),
-				request, "HTTP_1_1");
+	private static HttpRequest get(String url) {
+		return PipeRequests.request("GET", url, Map.of(), null);
 	}
 
 	/** Non-blocking: the body may arrive on the event loop the caller is running on. */
-	private static Mono<Map<String, Object>> json(McpHttpResponse response) {
-		return JdkFlowAdapter.flowPublisherToFlux(response.body())
-			.flatMapIterable(values -> values)
-			.map(buffer -> StandardCharsets.UTF_8.decode(buffer).toString())
-			.collect(Collectors.joining())
-			.map(text -> {
-				try {
-					return McpJsonDefaults.getMapper().readValue(text, new TypeRef<Map<String, Object>>() {
-					});
-				}
-				catch (Exception exception) {
-					throw new IllegalStateException("not JSON: " + text, exception);
-				}
-			});
+	private static Mono<Map<String, Object>> json(HttpResponse<Flow.Publisher<List<ByteBuffer>>> response) {
+		return PipeRequests.body(response).map(text -> {
+			try {
+				return McpJsonDefaults.getMapper().readValue(text, new TypeRef<Map<String, Object>>() {
+				});
+			}
+			catch (Exception exception) {
+				throw new IllegalStateException("not JSON: " + text, exception);
+			}
+		});
 	}
 
 }

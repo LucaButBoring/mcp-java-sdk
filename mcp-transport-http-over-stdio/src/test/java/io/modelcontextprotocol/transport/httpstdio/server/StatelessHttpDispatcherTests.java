@@ -2,7 +2,7 @@
  * Copyright 2026-2026 the original author or authors.
  */
 
-package io.modelcontextprotocol.server.transport.http;
+package io.modelcontextprotocol.transport.httpstdio.server;
 
 import java.time.Duration;
 import java.util.ArrayList;
@@ -27,7 +27,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 
 class StatelessHttpDispatcherTests {
 
-	private static final McpJsonMapper JSON_MAPPER = new TestMcpJsonMapper();
+	private static final McpJsonMapper JSON_MAPPER = io.modelcontextprotocol.json.McpJsonDefaults.getMapper();
 
 	private static final McpSchema.JSONRPCRequest REQUEST = new McpSchema.JSONRPCRequest(McpSchema.JSONRPC_VERSION,
 			"tools/list", "1", null);
@@ -63,8 +63,8 @@ class StatelessHttpDispatcherTests {
 	@Test
 	void rejectsDeclaredAndActualOversizeBodies() {
 		StatelessHttpDispatcher dispatcher = dispatcher(exchange -> Mono.error(new AssertionError("not called")), 8);
-		StatelessHttpRequest declared = new StatelessHttpRequest("POST", "/mcp", headers(), Optional.of(9L), "{}",
-				McpTransportContext.EMPTY);
+		StatelessHttpDispatcher.Request declared = new StatelessHttpDispatcher.Request("POST", "/mcp", headers(),
+				Optional.of(9L), "{}", McpTransportContext.EMPTY);
 		assertThat(dispatcher.dispatch(declared).block().status()).isEqualTo(413);
 		assertThat(dispatcher.dispatch(request("POST", "123456789")).block().status()).isEqualTo(413);
 	}
@@ -83,7 +83,7 @@ class StatelessHttpDispatcherTests {
 
 	@Test
 	void rejectsMissingRequiredAcceptMediaTypesWithLegacyError() {
-		StatelessHttpRequest request = new StatelessHttpRequest("POST", "/mcp",
+		StatelessHttpDispatcher.Request request = new StatelessHttpDispatcher.Request("POST", "/mcp",
 				new TestHeaders(Map.of("Accept", List.of("application/json"))), Optional.empty(), json(REQUEST),
 				McpTransportContext.EMPTY);
 		StatelessHttpResponse response = dispatcher(exchange -> Mono.error(new AssertionError("not called")))
@@ -103,7 +103,7 @@ class StatelessHttpDispatcherTests {
 
 	@Test
 	void mapsAcceptedNotificationAndCarriesRawProtocolHeader() {
-		StatelessHttpRequest request = new StatelessHttpRequest(
+		StatelessHttpDispatcher.Request request = new StatelessHttpDispatcher.Request(
 				"POST", "/mcp", new TestHeaders(Map.of("Accept", List.of("application/json, text/event-stream"),
 						"MCP-Protocol-Version", List.of("raw-version"))),
 				Optional.empty(), json(NOTIFICATION), McpTransportContext.EMPTY);
@@ -143,7 +143,9 @@ class StatelessHttpDispatcherTests {
 		assertThat(response.headers()).containsEntry("Content-Type", List.of("text/event-stream"))
 			.containsEntry("Cache-Control", List.of("no-cache"))
 			.containsEntry("X-Accel-Buffering", List.of("no"));
-		List<SseEvent> events = ((StatelessHttpResponse.Sse) response.body()).events().collectList().block();
+		List<StatelessHttpResponse.SseEvent> events = ((StatelessHttpResponse.Sse) response.body()).events()
+			.collectList()
+			.block();
 		assertThat(encode(events)).isEqualTo("event: message\ndata: " + json(first) + "\n\n" + "event: message\ndata: "
 				+ json(second) + "\n\n" + "event: message\ndata: " + json(terminal) + "\n\n");
 	}
@@ -171,8 +173,9 @@ class StatelessHttpDispatcherTests {
 			.dispatch(request("POST", json(REQUEST)))
 			.block();
 		StepVerifier.create(((StatelessHttpResponse.Sse) response.body()).events())
-			.expectErrorSatisfies(error -> assertThat(error).isInstanceOf(McpStatelessContractException.class)
-				.hasMessage("A stateless response stream must not emit a JSON-RPC request"))
+			.expectErrorSatisfies(
+					error -> assertThat(error).isInstanceOf(StatelessHttpDispatcher.ContractViolation.class)
+						.hasMessage("A stateless response stream must not emit a JSON-RPC request"))
 			.verify();
 	}
 
@@ -270,8 +273,9 @@ class StatelessHttpDispatcherTests {
 			.block();
 		StepVerifier.create(((StatelessHttpResponse.Sse) response.body()).events())
 			.expectNextCount(1)
-			.expectErrorSatisfies(error -> assertThat(error).isInstanceOf(McpStatelessContractException.class)
-				.hasMessage("A request-scoped response stream must emit a terminal JSON-RPC response"))
+			.expectErrorSatisfies(
+					error -> assertThat(error).isInstanceOf(StatelessHttpDispatcher.ContractViolation.class)
+						.hasMessage("A request-scoped response stream must emit a terminal JSON-RPC response"))
 			.verify();
 	}
 
@@ -297,18 +301,18 @@ class StatelessHttpDispatcherTests {
 			.block();
 
 		StepVerifier.create(((StatelessHttpResponse.Sse) requestEmission.body()).events())
-			.expectError(McpStatelessContractException.class)
+			.expectError(StatelessHttpDispatcher.ContractViolation.class)
 			.verify();
 		StepVerifier.create(((StatelessHttpResponse.Sse) postResponse.body()).events())
 			.expectNextCount(1)
-			.expectError(McpStatelessContractException.class)
+			.expectError(StatelessHttpDispatcher.ContractViolation.class)
 			.verify();
 	}
 
 	@Test
 	void mapsHandlerContractFailureToInvalidRequest() {
 		StatelessHttpResponse response = dispatcher(
-				exchange -> Mono.error(new McpStatelessContractException(123, "bad")))
+				exchange -> Mono.error(new StatelessHttpDispatcher.ContractViolation(123, "bad")))
 			.dispatch(request("POST", json(REQUEST)))
 			.block();
 		assertJsonError(response, 400, McpSchema.ErrorCodes.INVALID_REQUEST, "bad");
@@ -323,8 +327,9 @@ class StatelessHttpDispatcherTests {
 			.block();
 		StepVerifier.create(((StatelessHttpResponse.Sse) response.body()).events())
 			.expectNextCount(1)
-			.expectErrorSatisfies(error -> assertThat(error).isInstanceOf(McpStatelessContractException.class)
-				.hasMessage("A stateless response stream must end after its JSON-RPC response"))
+			.expectErrorSatisfies(
+					error -> assertThat(error).isInstanceOf(StatelessHttpDispatcher.ContractViolation.class)
+						.hasMessage("A stateless response stream must end after its JSON-RPC response"))
 			.verify();
 	}
 
@@ -386,8 +391,9 @@ class StatelessHttpDispatcherTests {
 		return new StatelessHttpDispatcher(JSON_MAPPER, handler, maxSize);
 	}
 
-	private static StatelessHttpRequest request(String method, String body) {
-		return new StatelessHttpRequest(method, "/mcp", headers(), Optional.empty(), body, McpTransportContext.EMPTY);
+	private static StatelessHttpDispatcher.Request request(String method, String body) {
+		return new StatelessHttpDispatcher.Request(method, "/mcp", headers(), Optional.empty(), body,
+				McpTransportContext.EMPTY);
 	}
 
 	private static TestHeaders headers() {
@@ -418,9 +424,9 @@ class StatelessHttpDispatcherTests {
 		}
 	}
 
-	private static String encode(List<SseEvent> events) {
+	private static String encode(List<StatelessHttpResponse.SseEvent> events) {
 		StringBuilder wire = new StringBuilder();
-		for (SseEvent event : events) {
+		for (StatelessHttpResponse.SseEvent event : events) {
 			event.id().ifPresent(id -> wire.append("id: ").append(id).append('\n'));
 			wire.append("event: ").append(event.event()).append('\n');
 			wire.append("data: ").append(event.data()).append("\n\n");

@@ -17,13 +17,6 @@ import io.modelcontextprotocol.server.McpTransportContextExtractor;
 import io.modelcontextprotocol.server.transport.DefaultServerTransportSecurityValidator;
 import io.modelcontextprotocol.server.transport.ServerHttpHeaderValidator;
 import io.modelcontextprotocol.server.transport.ServerTransportSecurityException;
-import io.modelcontextprotocol.server.transport.http.McpHttpBinding2026;
-import io.modelcontextprotocol.server.transport.http.McpStatelessStreamingServerHandler;
-import io.modelcontextprotocol.server.transport.http.SseEvent;
-import io.modelcontextprotocol.server.transport.http.StatelessHttpDispatcher;
-import io.modelcontextprotocol.server.transport.http.StatelessHttpRequest;
-import io.modelcontextprotocol.server.transport.http.StatelessHttpResponse;
-import io.modelcontextprotocol.server.transport.http.StatelessServerHandlerAdapter;
 import io.modelcontextprotocol.spec.McpStatelessServerTransport;
 import io.modelcontextprotocol.spec.ProtocolVersions;
 import io.modelcontextprotocol.transport.httpstdio.http2.Http2Request;
@@ -187,7 +180,7 @@ public final class HttpOverStdioServerTransport implements McpStatelessServerTra
 	@Override
 	public void setMcpHandler(McpStatelessServerHandler mcpHandler) {
 		Assert.notNull(mcpHandler, "mcpHandler must not be null");
-		setStreamingHandler(StatelessServerHandlerAdapter.adapt(mcpHandler));
+		setStreamingHandler(McpStatelessStreamingServerHandler.adapt(mcpHandler));
 	}
 
 	/**
@@ -259,8 +252,8 @@ public final class HttpOverStdioServerTransport implements McpStatelessServerTra
 			.stream()
 			.findFirst()
 			.flatMap(HttpOverStdioServerTransport::parseContentLength);
-		StatelessHttpRequest statelessRequest = new StatelessHttpRequest(request.method(), request.path(), headers,
-				contentLength, body, context);
+		StatelessHttpDispatcher.Request statelessRequest = new StatelessHttpDispatcher.Request(request.method(),
+				request.path(), headers, contentLength, body, context);
 		Duration keepAlive = this.keepAliveInterval;
 		current.dispatch(statelessRequest)
 			.subscribe(response -> writeResponse(writer, response, keepAlive), failure -> {
@@ -344,7 +337,7 @@ public final class HttpOverStdioServerTransport implements McpStatelessServerTra
 		return headers;
 	}
 
-	private static String encodeSse(SseEvent event) {
+	private static String encodeSse(StatelessHttpResponse.SseEvent event) {
 		StringBuilder encoded = new StringBuilder();
 		event.id().ifPresent(id -> encoded.append("id: ").append(id).append('\n'));
 		return encoded.append("event: ")
@@ -400,7 +393,7 @@ public final class HttpOverStdioServerTransport implements McpStatelessServerTra
 		private McpTransportContextExtractor<Http2Request> contextExtractor = request -> McpTransportContext.EMPTY;
 
 		private McpHttpBinding2026 binding = McpHttpBinding2026.builder()
-			.supportedVersions(List.of(ProtocolVersions.MCP_2026_07_28))
+			.supportedVersions(List.of(McpHttpBinding2026.PROTOCOL_VERSION))
 			.build();
 
 		private Http2RequestHandler applicationRoute;
