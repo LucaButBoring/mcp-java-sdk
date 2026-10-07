@@ -49,8 +49,11 @@ class ChildProcessMcpOverStdioTests {
 				.headers(McpHttpHeaders.builder()
 					.add("Accept", "application/json, text/event-stream")
 					.add("Content-Type", "application/json")
+					.add("MCP-Protocol-Version", "2026-07-28")
+					.add("Mcp-Method", "tools/list")
 					.build())
-				.body("{\"jsonrpc\":\"2.0\",\"id\":\"7\",\"method\":\"tools/list\"}")
+				.body("{\"jsonrpc\":\"2.0\",\"id\":\"7\",\"method\":\"tools/list\",\"params\":{\"_meta\":"
+						+ "{\"io.modelcontextprotocol/protocolVersion\":\"2026-07-28\"}}}")
 				.build();
 			var response = client.exchange().exchange(request, McpTransportContext.EMPTY).block(Duration.ofSeconds(10));
 			assertThat(response.statusCode()).isEqualTo(200);
@@ -59,6 +62,18 @@ class ChildProcessMcpOverStdioTests {
 			String body = read(response.body());
 			assertThat(body).contains("\"id\":\"7\"").contains("\"method\":\"tools/list\"");
 			assertThat(body).doesNotContain("\"pid\":" + ProcessHandle.current().pid() + "}");
+
+			McpHttpRequest legacyShape = McpHttpRequest.builder()
+				.method("POST")
+				.uri(URI.create(LOGICAL_URL + "/mcp"))
+				.headers(McpHttpHeaders.builder().add("Accept", "application/json, text/event-stream").build())
+				.body("{\"jsonrpc\":\"2.0\",\"id\":\"8\",\"method\":\"tools/list\"}")
+				.build();
+			var rejected = client.exchange()
+				.exchange(legacyShape, McpTransportContext.EMPTY)
+				.block(Duration.ofSeconds(10));
+			assertThat(rejected.statusCode()).as("2026 binding is on by default in the child").isEqualTo(400);
+			assertThat(read(rejected.body())).contains("\"code\":-32020");
 
 			McpHttpRequest notification = McpHttpRequest.builder()
 				.method("POST")

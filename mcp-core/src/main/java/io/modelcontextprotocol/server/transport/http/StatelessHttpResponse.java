@@ -50,7 +50,11 @@ public record StatelessHttpResponse(int status, Map<String, List<String>> header
 	 *
 	 * @param events ordered events
 	 */
-	public record Sse(Flux<SseEvent> events) implements Body {
+	public record Sse(Flux<SseEvent> events, boolean longLived) implements Body {
+
+		public Sse(Flux<SseEvent> events) {
+			this(events, false);
+		}
 
 		public Sse {
 			Objects.requireNonNull(events, "events must not be null");

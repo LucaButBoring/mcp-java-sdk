@@ -219,6 +219,9 @@ class NettyPipeChannelTests {
 		pair.b.read();
 
 		assertThat(receiver.result.get(5, TimeUnit.SECONDS)).isEqualTo(bytes);
+		// The promise completes on the sender's event loop after the bytes are on the
+		// pipe, so the receiver can observe them first.
+		assertThat(write.await(5, TimeUnit.SECONDS)).isTrue();
 		assertThat(write.isSuccess()).isTrue();
 	}
 

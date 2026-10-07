@@ -26,6 +26,15 @@ public interface HttpHeaders {
 	 */
 	String PROTOCOL_VERSION = "MCP-Protocol-Version";
 
+	/** Declares the JSON-RPC method carried by the request body. */
+	String MCP_METHOD = "Mcp-Method";
+
+	/** Declares the named MCP target carried by the request body. */
+	String MCP_NAME = "Mcp-Name";
+
+	/** Prefix for tool parameter binding headers. */
+	String MCP_PARAM_PREFIX = "Mcp-Param-";
+
 	/**
 	 * The HTTP Content-Length header.
 	 * @see <a href=

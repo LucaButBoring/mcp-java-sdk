@@ -154,6 +154,15 @@ public final class McpSchema {
 		public static final int RESOURCE_NOT_FOUND = -32002;
 
 		/**
+		 * A required HTTP binding header is missing, malformed, or disagrees with the
+		 * body.
+		 */
+		public static final int HEADER_MISMATCH = -32020;
+
+		/** The request declares an unsupported MCP protocol version. */
+		public static final int UNSUPPORTED_PROTOCOL_VERSION = -32022;
+
+		/**
 		 * URL elicitation is required before the request can proceed.
 		 */
 		public static final int URL_ELICITATION_REQUIRED = -32042;
