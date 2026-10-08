@@ -32,11 +32,11 @@ pipe channel  ------- child stdin / stdout -------   pipe channel
 
 The bottom layer is a pair of byte streams: the child's stdin and stdout as seen from the host, or `System.in` and the raw stdout descriptor as seen from the child. These are blocking `InputStream` and `OutputStream` objects, not selectable channels, so Netty's normal socket transports cannot use them. The module provides a small custom Netty `Channel` that copies bytes between the streams and the Netty pipeline. Half-close is supported: closing the host's output closes the child's stdin, which is the child's signal to exit.
 
-A Unix-domain-socket implementation of the same pipe interface is included as a fallback wire and passes the same pipe tests. It covers cases where stdio cannot carry the connection: a local server that is already running rather than launched by the host, such as a shared daemon or sidecar; a launcher or wrapper script that prints its own output to stdout before starting the server; and a server that loads native code writing directly to file descriptor 1, which redirecting `System.out` does not affect.
+Over process pipes, the transport only reaches servers that the host launches itself and whose stdout carries nothing but HTTP/2 frames. A local server that is already running, such as a shared daemon or sidecar, cannot be reached this way. Neither can a server started through a launcher or wrapper script that prints to stdout first, or one that loads native code writing directly to file descriptor 1, which redirecting `System.out` does not affect. These are uncommon, and server developers can reasonably be expected to keep stdout clean.
 
 ### HTTP/2 framing
 
-On top of the pipe, Netty's HTTP/2 codec runs with prior knowledge: the client sends the HTTP/2 connection preface as its first bytes, without TLS and without an HTTP/1.1 upgrade request. The term h2c is general rather than Netty-specific, but it is ambiguous. RFC 7540 used it to name HTTP/2 over cleartext TCP, however the connection starts, and also as the token in the `Upgrade: h2c` request. RFC 9113 deprecated the `h2c` Upgrade mechanism and its token usage. To avoid ambiguity, this document uses "cleartext HTTP/2 with prior knowledge" instead. The wire is a pipe rather than TCP either way.
+On top of the pipe, Netty's HTTP/2 codec runs with prior knowledge: the client sends the HTTP/2 connection preface as its first bytes, without TLS and without an HTTP/1.1 upgrade request.
 
 Prior knowledge is possible because the host controls both ends. It launches the child specifically to speak HTTP/2, so there is nothing to negotiate. TLS is unnecessary because the pipe is private to the two processes and never crosses a network. It is also the reason the transport supplies its own HTTP/2 client: the JDK's `HttpClient` can only reach cleartext HTTP/2 through the upgrade request and does not support prior knowledge, in addition to only connecting to sockets it opens itself.
 
@@ -97,7 +97,7 @@ HTTP/1.1 over one byte stream processes requests strictly in order. A single lon
 
 The JDK has an HTTP/2 client, but it only runs over sockets it opens itself and does not support prior knowledge, and the JDK has no HTTP/2 server. Running HTTP/2 over an arbitrary pair of streams therefore needs a third-party HTTP/2 implementation, and Netty's is the most widely used on the JVM. The module depends on `netty-codec-http2`, `netty-handler`, `netty-transport`, and `netty-buffer`, and their transitive Netty modules. `mcp-core` and its users are unaffected unless they add this module.
 
-The dependency is lighter than "Netty" usually implies. The module uses only Netty's pure-Java codec and pipeline: no native epoll or kqueue transport, no sockets, and no server bootstrap. It therefore runs anywhere a JVM can spawn processes, with no platform-specific artifacts.
+The module uses only Netty's pure-Java codec and pipeline: no native epoll or kqueue transport, no sockets, and no server bootstrap. It therefore runs anywhere a JVM can spawn processes, with no platform-specific artifacts.
 
 Netty can run alongside other HTTP stacks in the same process, including Jetty, Tomcat, Undertow, OkHttp, and the JDK client. It does not install JVM-wide handlers or take over process-wide resources, so it does not conflict with them. The practical risks are about versions and policy rather than coexistence:
 
@@ -105,9 +105,7 @@ Netty can run alongside other HTTP stacks in the same process, including Jetty, 
 - Some deployments enforce strict dependency allowlists or require every dependency to be reviewed, and Netty is a large dependency to add for a single transport. Shading Netty into the module, as gRPC does with `grpc-netty-shaded`, avoids version conflicts at the cost of a larger artifact and of security fixes that only arrive with a new module release.
 - On JDK 24 and later, Netty 4.1, which this module uses, calls memory-access methods of `sun.misc.Unsafe`. These print a runtime warning (JEP 498) unless the JVM is started with `--sun-misc-unsafe-memory-access=allow`. Newer Netty 4.2 releases can avoid `Unsafe`, but only on specific JDK versions or with further JVM flags. This affects every Netty user equally rather than this module in particular, but a library cannot set JVM flags for the application that embeds it.
 
-The alternative is an HTTP/2 implementation written for the module. HTTP/2 framing over a single trusted peer is a much smaller problem than a general-purpose HTTP/2 stack, since it needs no TLS, no connection pooling, and no defense against arbitrary clients, but it still involves HPACK, flow control, and stream lifecycle, and would be new code to maintain. For a proof of concept, reusing Netty answers the question being asked more cheaply.
-
-`java.net.http.HttpClient` still appears on the client side, but only as an abstract base class. `PipeHttpClient` replaces the JDK implementation entirely and uses Netty underneath.
+The alternative is an HTTP/2 implementation written for the module. HTTP/2 framing over a single trusted peer is a much smaller problem than a general-purpose HTTP/2 stack, since it needs no TLS, no connection pooling, and no defense against arbitrary clients, but it still involves HPACK, flow control, and stream lifecycle, and would be new code to maintain. Owning a protocol implementation is a long-term maintenance and security commitment, so reusing an established HTTP/2 stack is preferable where the dependency is acceptable. Weighing that against the dependency costs above is a decision for the SDK maintainers.
 
 ### Blocking process pipes under an asynchronous stack
 
@@ -132,7 +130,7 @@ The remaining gaps are all in SDK core and are independent of the transport:
 - Stateless server handlers cannot stream notifications, so request-scoped SSE responses need the module's own handler interface.
 - Newer protocol features such as `server/discover` and the newer result fields are not implemented.
 
-The transport has been tested on Linux only. On Windows, process pipes are not selectable, which the blocking pipe adapter already accounts for, and Unix-domain sockets need Windows 10 version 1803 or later. On macOS, the default pipe buffer is smaller than on Linux, which may reduce throughput but not correctness, and Unix-domain socket paths are limited to 104 bytes, slightly less than Linux's 108.
+The transport has been tested on Linux only. On Windows, process pipes are not selectable, which the blocking pipe adapter already accounts for. On macOS, the default pipe buffer is smaller than on Linux, which may reduce throughput but not correctness.
 
 ## Changes to existing public interfaces
 

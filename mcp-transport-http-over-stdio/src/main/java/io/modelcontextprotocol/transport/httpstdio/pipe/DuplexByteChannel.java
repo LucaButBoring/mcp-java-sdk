@@ -7,7 +7,7 @@ import java.io.OutputStream;
 
 /**
  * A bidirectional byte-transport SPI used by the HTTP-over-stdio channel. Implementations
- * may represent process pipes, domain sockets, or connected in-memory pairs.
+ * may represent process pipes or connected in-memory pairs.
  */
 public interface DuplexByteChannel extends Closeable {
 

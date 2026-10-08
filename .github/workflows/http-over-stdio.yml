@@ -35,7 +35,6 @@ jobs:
       - name: Install SDK modules the transport depends on
         run: mvn -B -ntp -pl mcp-core,mcp-json-jackson3,mcp-test -am install -DskipTests
 
-      # Covers the process-pipe wire (real child JVMs over stdin/stdout), the in-memory
-      # wire, and the Unix-domain fallback wire (skipped where AF_UNIX is unavailable).
+      # Covers the process-pipe wire (real child JVMs over stdin/stdout) and the in-memory wire.
       - name: Transport contract
         run: mvn -B -ntp -pl mcp-transport-http-over-stdio verify
