@@ -32,7 +32,11 @@ pipe channel  ------- child stdin / stdout -------   pipe channel
 
 The bottom layer is a pair of byte streams: the child's stdin and stdout as seen from the host, or `System.in` and the raw stdout descriptor as seen from the child. These are blocking `InputStream` and `OutputStream` objects, not selectable channels, so Netty's normal socket transports cannot use them. The module provides a small custom Netty `Channel` that copies bytes between the streams and the Netty pipeline. Half-close is supported: closing the host's output closes the child's stdin, which is the child's signal to exit.
 
-Over process pipes, the transport only reaches servers that the host launches itself and whose stdout carries nothing but HTTP/2 frames. A local server that is already running, such as a shared daemon or sidecar, cannot be reached this way. Neither can a server started through a launcher or wrapper script that prints to stdout first, or one that loads native code writing directly to file descriptor 1, which redirecting `System.out` does not affect. These are uncommon, and server developers can reasonably be expected to keep stdout clean.
+The connection lives exactly as long as the child process: the host launches the server, owns its stdin and stdout, and loses the connection when either side exits. Servers that do not fit that lifetime cannot be reached over process pipes:
+
+- a server that is already running when the host starts, such as a shared daemon or a sidecar;
+- a server shared by several hosts at once;
+- a server that should outlive the host, so that a restarted host reconnects to it instead of launching a new one.
 
 ### HTTP/2 framing
 
@@ -75,7 +79,11 @@ Everything above the HTTP client stays the same as for a remote server: request 
 
 Request headers reach the server unchanged, but the transport does not check that headers which mirror the body actually match it. That check is general Streamable HTTP server logic that the servlet transport needs too, so it belongs in `mcp-core`, where both transports can share it, and is outside the scope of a transport.
 
-A child serving its own stdio reserves stdout for HTTP/2 frames. `builderOnCurrentProcessStdio()` writes frames to the raw stdout file descriptor and points `System.out` at `System.err`. This matters in the Java ecosystem, where logging frameworks commonly write to `System.out` by default. A single stray line on stdout corrupts the HTTP/2 connection.
+A child serving its own stdio reserves stdout for HTTP/2 frames, and a single stray byte on stdout corrupts the connection. The transport protects against the common case: `builderOnCurrentProcessStdio()` writes frames to the raw stdout file descriptor and points `System.out` at `System.err`, so Java code that prints or logs to `System.out` after that point, as many logging frameworks do by default, is harmless. Anything that bypasses `System.out` or runs before the redirect remains the server developer's responsibility:
+
+- a launcher or wrapper script that prints to stdout before starting the JVM;
+- output written, or a reference to `System.out` cached by a component such as a logging backend, before `builderOnCurrentProcessStdio()` is called;
+- native code that writes directly to file descriptor 1.
 
 ### Logical origins and authorization
 
